@@ -2078,13 +2078,70 @@ window.PortfolioCalculations = {
     return rate == null ? null : rate * scale;
   },
 
-  /** { currency: rate-into-base | null } for every currency, base included. */
-  async fxRates(apiKey, baseCurrency, currencies) {
+  /**
+   * { currency: rate-into-base | null } for every currency, base included.
+   * `failsBy` (optional object): for a currency that got no rate, what its
+   * requests threw (a list, for RateLimitWait.outage) -- so the positions
+   * it leaves without a value can say why.
+   */
+  async fxRates(apiKey, baseCurrency, currencies, failsBy) {
     const rates = { [baseCurrency]: 1 };
     const unique = [...new Set((currencies || []).filter(c => c && c !== baseCurrency))];
-    const found = await Promise.all(unique.map(c => this.fxRate(apiKey, c, baseCurrency)));
+    const found = await Promise.all(unique.map(async (c) => {
+      const fails = failsBy ? [] : undefined;
+      const rate = await this.fxRate(apiKey, c, baseCurrency, fails);
+      if (rate == null && fails && fails.length) failsBy[c] = fails;
+      return rate;
+    }));
     unique.forEach((c, i) => { rates[c] = found[i]; });
     return rates;
+  },
+
+  /**
+   * Why held positions are left without a value, as sentences in the words
+   * every screen uses (RateLimitWait), or '' when it is not known. A rate
+   * that did not load names its pair ("The GBP/USD rate did not load:
+   * EODHD answered with an error (500)."); a quote that did not load, its
+   * reason. `rows`: holdingsData entries (fxFail / priceFail, set where the
+   * prices are loaded). The totals said only "1 without a price".
+   */
+  unpricedWhy(rows, baseCurrency, opts) {
+    const RLW = window.RateLimitWait;
+    if (!RLW || !RLW.failText) return '';
+    const held = (rows || []).filter(r => r && r.priceUnavailable && Number(r.quantity) > 0);
+    const out = [];
+    const seen = {};
+    held.forEach((r) => {
+      const f = r.fxUnavailable ? r.fxFail : null;
+      if (!f) return;
+      const pair = `${r.currency}/${baseCurrency}`;
+      if (seen[pair]) return;
+      seen[pair] = true;
+      out.push(RLW.failText(`The ${pair} rate`, f));
+    });
+    if (!(opts && opts.ratesOnly)) {
+      const q = held.find(r => !r.fxUnavailable && r.priceFail);
+      if (q) out.push(RLW.failText('The prices', q.priceFail));
+      const none = this.noRecordWhy(rows);
+      if (none) out.push(none);
+    }
+    return out.join(' ');
+  },
+
+  /**
+   * The held positions whose ticker answered with no price at all -- a
+   * quote of "NA" and no close in its history -- said as that: "No price on
+   * record for ZZZQ." An answer, not a failure: the batch's 500 was blamed
+   * on it once the single request had answered.
+   */
+  noRecordWhy(rows) {
+    const codes = [];
+    (rows || []).forEach((r) => {
+      if (!r || !r.priceUnavailable || r.fxUnavailable || !r.noRecord || !(Number(r.quantity) > 0)) return;
+      const c = String(r.symbol || '').split('.')[0];
+      if (c && codes.indexOf(c) === -1) codes.push(c);
+    });
+    return codes.length ? `No price on record for ${codes.join(', ')}.` : '';
   },
 
   /**

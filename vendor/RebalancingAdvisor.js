@@ -97,7 +97,12 @@ window.RebalancingAdvisor = ({ holdings, holdingsData, theme, onClose, onRetryPr
     // read "$0" with every asset type at 0%.
     const rows = (holdings || []).map(h => holdingsData?.[h.id]).filter(Boolean);
     const needsPrices = rows.some(d => d.priceUnavailable && Number(d.quantity) > 0) && !(totalValue > 0);
-    return { totalValue, count, types, currency, needsPrices };
+    // Why none came, when that is known: a currency rate that did not load,
+    // the quotes' failure.
+    const PC = window.PortfolioCalculations;
+    // Some held, not all: the total leaves them out, and says why too.
+    const why = PC && PC.unpricedWhy ? PC.unpricedWhy(rows, currency) : '';
+    return { totalValue, count, types, currency, needsPrices, why };
   }, [holdings, holdingsData]);
 
   // Target weights a template or an AI build left in each position's note
@@ -191,7 +196,15 @@ window.RebalancingAdvisor = ({ holdings, holdingsData, theme, onClose, onRetryPr
               </div>
               {portfolioSummary.needsPrices && (
                 <div style={{ fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
-                  Needs current prices — none came back for these positions.
+                  Needs current prices — none came back for these positions.{portfolioSummary.why ? ' ' + portfolioSummary.why : ''}
+                  {onRetryPrices && (
+                    <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 6, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer' }} />
+                  )}
+                </div>
+              )}
+              {!portfolioSummary.needsPrices && portfolioSummary.why && (
+                <div data-unpriced-why="true" style={{ fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
+                  <span role="status">{portfolioSummary.why} The total leaves out the positions without a value.</span>
                   {onRetryPrices && (
                     <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 6, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer' }} />
                   )}

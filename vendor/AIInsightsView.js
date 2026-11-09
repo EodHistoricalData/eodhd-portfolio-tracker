@@ -267,7 +267,7 @@ window.AIInsightsView = ({ holdings, holdingsData, portfolioId, onClose, theme }
               <span style={{ fontSize: 11, color: isDark ? C3.textMutedDark : C3.textMutedLight, flexShrink: 0 }}>
                 {formatTime(card.timestamp)}
               </span>
-              <button aria-label="Copy answer" onClick={(e) => {
+              <button data-hit="" aria-label="Copy answer" onClick={(e) => {
                 e.stopPropagation();
                 if (card.answer) {
                   navigator.clipboard.writeText(card.answer).catch(() => {});
@@ -279,7 +279,7 @@ window.AIInsightsView = ({ holdings, holdingsData, portfolioId, onClose, theme }
               }} title="Copy">
                 <Icon name="copy" size={14} />
               </button>
-              <button aria-label="Remove card" onClick={(e) => { e.stopPropagation(); removeCard(card.id); }} style={{
+              <button data-hit="" aria-label="Remove card" onClick={(e) => { e.stopPropagation(); removeCard(card.id); }} style={{
                 background: 'none', border: 'none', cursor: 'pointer', padding: 2,
                 color: isDark ? C3.textMutedDark : C3.textMutedLight,
               }}>

@@ -513,7 +513,10 @@ window.AddTransactionModal = ({ holding, baseCurrency, onClose, onSave, theme, t
                 {Calc.formatCurrency(totals.total || 0, holding.currency)}
               </span>
             </div>
-            {holding.currency !== baseCurrency && exchangeRate !== 1 && (
+            {/* With no rate, the line below (fxNote) is the one that says
+                why: a grey "rate unavailable" beside it was a second line
+                about the same failure. */}
+            {holding.currency !== baseCurrency && exchangeRate !== 1 && !(fxNote && !loadingFX && !Number.isFinite(exchangeRate)) && (
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8, fontSize: 14 }}>
                 <span style={styles.muted}>
                   {loadingFX ? 'Loading FX...' : Number.isFinite(exchangeRate) ? `@ ${exchangeRate < 0.01 ? exchangeRate.toPrecision(4) : exchangeRate.toFixed(4)} on ${txDate}` : `${holding.currency}/${baseCurrency} rate unavailable`}

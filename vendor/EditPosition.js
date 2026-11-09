@@ -393,7 +393,9 @@ window.EditPositionModal = ({ holding, holdingData, baseCurrency, onClose, onSav
 
             {/* The rate this adjustment will be recorded at, and a warning
                 when it could not be fetched -- it used to be written as 1. */}
-            {(holding.currency || 'USD') !== baseCurrency && (
+            {/* With no rate, rateError (below) says why; "No GBP/USD rate"
+                beside it was a second line about one failure. */}
+            {(holding.currency || 'USD') !== baseCurrency && !(rateError && !rateLoading && !Number.isFinite(adjustmentRate)) && (
               <div style={{ ...styles.muted, marginBottom: 12 }}>
                 {rateLoading ? 'Looking up the rate…'
                   : Number.isFinite(adjustmentRate) ? `Recorded at ${adjustmentRate < 0.01 ? adjustmentRate.toPrecision(4) : adjustmentRate.toFixed(4)} ${holding.currency}/${baseCurrency} (${adjustmentDate})`

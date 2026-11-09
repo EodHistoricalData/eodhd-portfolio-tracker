@@ -26,12 +26,15 @@ window.PortfolioFundamentals = (() => {
   const fails = new Map();
   let busy = 0;
   const waiting = [];
-  const slot = (task) => new Promise((resolve, reject) => {
+  // `onTimeout`: told when the wait ends with no answer. It answered null
+  // and kept nothing, so Health's earnings read "No earnings data available"
+  // and projected income blamed the plan for a request that hung.
+  const slot = (task, onTimeout) => new Promise((resolve, reject) => {
     const run = () => {
       busy++;
       let done = false;
       const finish = () => { if (done) return; done = true; busy--; const next = waiting.shift(); if (next) next(); };
-      const t = setTimeout(() => { finish(); resolve(null); }, window.PT_FUNDAMENTALS_WAIT_MS || 20000);
+      const t = setTimeout(() => { finish(); if (onTimeout) onTimeout(); resolve(null); }, window.PT_FUNDAMENTALS_WAIT_MS || 20000);
       Promise.resolve().then(task).then((v) => { clearTimeout(t); finish(); resolve(v); }, (e) => { clearTimeout(t); finish(); reject(e); });
     };
     if (busy < CAP) run(); else waiting.push(run);
@@ -51,7 +54,7 @@ window.PortfolioFundamentals = (() => {
         if (RLW && RLW.notData && RLW.notData(v)) { fails.set(k, { unreadable: true, status: 200 }); return null; }
         fails.delete(k);
         return v;
-      }, (err) => { fails.set(k, err || {}); return null; }))
+      }, (err) => { fails.set(k, err || {}); return null; }), () => fails.set(k, { status: 0, timedOut: true }))
       .then((v) => {
         if (store.get(k) && store.get(k).promise === p) {
           if (answered(v)) store.set(k, { at: now(), value: v }); else store.delete(k);
@@ -262,6 +265,12 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
   // transactions and arrives in holdingsData -- so asking them never said
   // yes, and a refused key read "No holdings yet".
   const needsPrices = holdingsWithData.some(h => h.priceUnavailable && Number(h.quantity) > 0);
+  // Why they have none, in the words every screen uses: a currency rate that
+  // did not load is named with its reason, as the quotes' failure is
+  // (Calc.unpricedWhy); '' when it is not known. Every count of unpriced
+  // positions here said only that.
+  const unpricedWhyText = Calc.unpricedWhy(holdingsWithData, baseCurrency || 'USD');
+  const needsPricesWords = 'Needs current prices — none came back for these positions.' + (unpricedWhyText ? ' ' + unpricedWhyText : '');
   // Beside a "needs current prices" message: asks for the quotes once more.
   // Nothing on the page did; only a reload or another portfolio refetched.
   const retryPrices = onRetryPrices ? (
@@ -1001,7 +1010,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
       const totalCost = Calc.getTotalCost(holdingsWithData);
       if (totalValue <= 0) {
         // No prices is not no value.
-        setMonteCarloData({ error: holdingsWithData.some(h => h.priceUnavailable && Number(h.quantity) > 0) ? 'Needs current prices — none came back for these positions.' : 'Portfolio has no value' });
+        setMonteCarloData({ error: holdingsWithData.some(h => h.priceUnavailable && Number(h.quantity) > 0) ? needsPricesWords : 'Portfolio has no value' });
         setLoading(false);
         return;
       }
@@ -1510,19 +1519,19 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
             <div style={compact ? { ...styles.card, padding: 10, marginBottom: 10 } : styles.card}>
               <h3 style={{ fontWeight: 600, marginBottom: compact ? 10 : 16, marginTop: 0, fontSize: compact ? 12 : undefined }}>By Asset Type</h3>
               {allocationByType.length > 0 ? <AllocationBar data={allocationByType} colorMap={COLORS.type} labelMap={TYPE_LABELS} />
-                : <p style={{ textAlign: 'center', padding: compact ? 8 : 16, color: isDark ? C3.textMutedDark : C3.textMutedLight, fontSize: compact ? 12 : undefined }}>{pricesLoading ? 'Loading prices…' : needsPrices ? <>Needs current prices — none came back for these positions.{retryPrices}</> : 'No holdings yet'}</p>}
+                : <p style={{ textAlign: 'center', padding: compact ? 8 : 16, color: isDark ? C3.textMutedDark : C3.textMutedLight, fontSize: compact ? 12 : undefined }}>{pricesLoading ? 'Loading prices…' : needsPrices ? <>{needsPricesWords}{retryPrices}</> : 'No holdings yet'}</p>}
             </div>
             <div style={compact ? { ...styles.card, padding: 10, marginBottom: 10 } : styles.card}>
               <h3 style={{ fontWeight: 600, marginBottom: compact ? 10 : 16, marginTop: 0, fontSize: compact ? 12 : undefined }}>By Sector</h3>
               {allocationBySector.length > 0 ? <AllocationBar data={allocationBySector} colorMap={COLORS.sector} labelMap={sectorsLoading ? { [Calc.UNCLASSIFIED_SECTOR]: 'Sector loading…' } : undefined} />
-                : <p style={{ textAlign: 'center', padding: compact ? 8 : 16, color: isDark ? C3.textMutedDark : C3.textMutedLight, fontSize: compact ? 12 : undefined }}>{pricesLoading ? 'Loading prices…' : sectorsLoading ? 'Loading sectors…' : needsPrices ? 'Needs current prices — none came back for these positions.' : 'No sector data'}</p>}
+                : <p style={{ textAlign: 'center', padding: compact ? 8 : 16, color: isDark ? C3.textMutedDark : C3.textMutedLight, fontSize: compact ? 12 : undefined }}>{pricesLoading ? 'Loading prices…' : sectorsLoading ? 'Loading sectors…' : needsPrices ? needsPricesWords : 'No sector data'}</p>}
             </div>
             <div style={compact ? { ...styles.card, padding: 10, marginBottom: 10 } : styles.card}>
               <h3 style={{ fontWeight: 600, marginBottom: compact ? 10 : 16, marginTop: 0, fontSize: compact ? 12 : undefined }}>By Currency</h3>
               {/* Empty is "nothing valued", not one currency: with every
                   price refused it read "Single currency portfolio". */}
               {allocationByCurrency.length > 0 ? <AllocationBar data={allocationByCurrency} colorMap={COLORS.sector} />
-                : <p style={{ textAlign: 'center', padding: compact ? 8 : 16, color: isDark ? C3.textMutedDark : C3.textMutedLight, fontSize: compact ? 12 : undefined }}>{pricesLoading ? 'Loading prices…' : needsPrices ? 'Needs current prices — none came back for these positions.' : 'No holdings yet'}</p>}
+                : <p style={{ textAlign: 'center', padding: compact ? 8 : 16, color: isDark ? C3.textMutedDark : C3.textMutedLight, fontSize: compact ? 12 : undefined }}>{pricesLoading ? 'Loading prices…' : needsPrices ? needsPricesWords : 'No holdings yet'}</p>}
             </div>
 
             {/* Geography Allocation */}
@@ -1547,7 +1556,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                   ))}
                 </div>
               ) : (
-                <p style={{ textAlign: 'center', padding: 16, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{pricesLoading ? 'Loading prices…' : needsPrices ? 'Needs current prices — none came back for these positions.' : 'No geographic data'}</p>
+                <p style={{ textAlign: 'center', padding: 16, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{pricesLoading ? 'Loading prices…' : needsPrices ? needsPricesWords : 'No geographic data'}</p>
               )}
             </div>
           </>
@@ -1756,7 +1765,11 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                     <div style={{ fontWeight: 600, color: acc('#3b82f6') }}>{Calc.formatCurrency(performanceData[performanceData.length - 1]?.dividends || 0, baseCurrency)}</div>
                   </div>
                 </div>
-                <div style={{ borderTop: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}`, paddingTop: 16 }}>
+                {/* Why the value leaves positions out, when it is known. */}
+                {unpricedHeld > 0 && unpricedWhyText && (
+                  <p data-unpriced-why="true" style={{ margin: '0 0 16px', fontSize: 12, lineHeight: 1.5, textAlign: 'center', color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{unpricedWhyText}{retryPrices}</p>
+                )}
+                <div style={{ borderTop:`1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}`, paddingTop: 16 }}>
                   <div style={{ fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight, marginBottom: 8 }}>Investment History</div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {performanceData.slice(-12).map((data) => {
@@ -1789,7 +1802,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
               <h3 style={{ fontWeight: 600, marginBottom: 12, marginTop: 0 }}>Projected Income</h3>
               {dividendProjection && dividendProjection.needsPrices ? (
                 <p style={{ margin: 0, padding: '8px 0', fontSize: 13, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
-                  Projected income needs current prices — none came back for your {dividendProjection.unpriced} holding{dividendProjection.unpriced === 1 ? '' : 's'}. Dividends you record still count in Historical Income below.{retryPrices}
+                  Projected income needs current prices — none came back for your {dividendProjection.unpriced} holding{dividendProjection.unpriced === 1 ? '' : 's'}.{unpricedWhyText ? ' ' + unpricedWhyText : ''} Dividends you record still count in Historical Income below.{retryPrices}
                 </p>
               ) : dividendProjection && dividendProjection.unavailable && dividendProjection.failed ? (
                 <p style={{ margin: 0, padding: '8px 0', fontSize: 13, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
@@ -1803,7 +1816,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                 <>
                   {dividendProjection.unpriced > 0 && (
                     <p style={{ margin: '0 0 12px', fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
-                      Estimate leaves out {dividendProjection.unpriced} holding{dividendProjection.unpriced === 1 ? '' : 's'} with no current price.
+                      Estimate leaves out {dividendProjection.unpriced} holding{dividendProjection.unpriced === 1 ? '' : 's'} with no current price.{unpricedWhyText ? ' ' + unpricedWhyText : ''}{unpricedWhyText ? retryPrices : null}
                     </p>
                   )}
                   {dividendProjection.partial > 0 && (
@@ -1949,7 +1962,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                 </p>
               ) : benchmarkData && benchmarkData.needsPrices ? (
                 <p style={{ textAlign: 'center', padding: 24, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
-                  Needs current prices — none came back for these positions, so there is no return to compare.{retryPrices}
+                  Needs current prices — none came back for these positions, so there is no return to compare.{unpricedWhyText ? ' ' + unpricedWhyText : ''}{retryPrices}
                 </p>
               ) : benchmarkData && benchmarkData.tooShort ? (
                 <p style={{ textAlign: 'center', padding: 24, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
@@ -1994,6 +2007,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                   <div style={{ paddingTop: 16, marginTop: 16, borderTop: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}`, fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight, lineHeight: 1.5 }}>
                     Since {benchmarkData.since}. Total return over everything paid in: {benchmarkData.totalReturnPercent == null ? 'n/a' : Calc.formatPercent(benchmarkData.totalReturnPercent)}
                     {benchmarkData.excluded ? ` — ${benchmarkData.excluded} unpriced position${benchmarkData.excluded === 1 ? '' : 's'} left out` : ''}.
+                    {benchmarkData.excluded && unpricedWhyText ? ' ' + unpricedWhyText : ''}
                   </div>
                   )}
                 </div>
@@ -2032,7 +2046,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                   {(window._corrCustomSymbols || []).map((s, i) => (
                     <span key={s} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 3, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', fontSize: 12, fontWeight: 600 }}>
                       {s.split('.')[0]}
-                      <button aria-label="Remove symbol" onClick={() => { window._corrCustomSymbols = window._corrCustomSymbols.filter((_, j) => j !== i); loadCorrelationMatrix(window._corrCustomSymbols); }} style={{ background: 'none', border: 'none', color: ink(0.3), cursor: 'pointer', fontSize: 14, padding: '0 2px' }}>x</button>
+                      <button data-hit="end" aria-label="Remove symbol" onClick={() => { window._corrCustomSymbols = window._corrCustomSymbols.filter((_, j) => j !== i); loadCorrelationMatrix(window._corrCustomSymbols); }} style={{ background: 'none', border: 'none', color: ink(0.3), cursor: 'pointer', fontSize: 14, padding: '0 2px' }}>x</button>
                     </span>
                   ))}
                 </div>
@@ -2070,7 +2084,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                 </div>
                 <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   {['AAPL.US', 'TSLA.US', 'NVDA.US', 'BTC-USD.CC', 'ETH-USD.CC', 'GLD.US', 'SPY.US', 'QQQ.US', 'EURUSD.FOREX', 'TLT.US'].filter(s => !(window._corrCustomSymbols || []).includes(s)).slice(0, 6).map(s => (
-                    <button key={s} onClick={() => {
+                    <button key={s} data-hit="" onClick={() => {
                       if (!window._corrCustomSymbols) window._corrCustomSymbols = [];
                       window._corrCustomSymbols.push(s);
                       loadCorrelationMatrix(window._corrCustomSymbols);
@@ -2483,7 +2497,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
         {/* What-If Tab */}
         {activeTab === 'whatif' && window.WhatIfScenarioTab && (
           React.createElement(window.WhatIfScenarioTab, {
-            apiKey, holdings, holdingsData, baseCurrency, theme
+            apiKey, holdings, holdingsData, baseCurrency, theme, onRetryPrices
           })
         )}
       </div>

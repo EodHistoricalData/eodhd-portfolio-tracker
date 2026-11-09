@@ -1,5 +1,5 @@
 // What-If Portfolio Scenario — tab content for PortfolioAnalytics
-window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, theme }) => {
+window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, theme, onRetryPrices }) => {
   const useFeatureCost = (() => null);
   const verdictCost = useFeatureCost('whatif_scenario');
   // Light theme: darker success/error/warning inks and accents, so text clears
@@ -106,6 +106,13 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
   // whichever holding happened to come first.
   // Shares still held only: a position sold to zero was offered as the
   // source of a swap, which then said "Pick a held position to swap from".
+  // Why held positions have no value, in the shared words
+  // (Calc.unpricedWhy), or ''.
+  const unpricedWhy = React.useMemo(() => {
+    const PC = window.PortfolioCalculations;
+    const rows = (holdings || []).map(h => holdingsData?.[h.id]).filter(Boolean);
+    return PC && PC.unpricedWhy ? PC.unpricedWhy(rows, baseCurrency || 'USD') : '';
+  }, [holdings, holdingsData, baseCurrency]);
   const heldSymbols = React.useMemo(() => [...new Set(
     holdings.filter(h => h.symbol && holdingsData?.[h.id] && !holdingsData[h.id].priceUnavailable && Number(holdingsData[h.id].quantity) > 0).map(h => h.symbol)
   )], [holdings, holdingsData]);
@@ -576,6 +583,18 @@ Diversification score: ${Math.round(result.diversificationScore)}/100 (effective
             ))}
           </div>
 
+          {/* Positions held and left without a value (a currency rate or a
+              quote that did not load): not in either total, and said why,
+              with Try again -- "Before" read $480 for a $94,000 portfolio
+              when its GBP/USD rate failed. */}
+          {unpricedWhy && (
+            <div data-unpriced-why="true" style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+              <span role="status">{unpricedWhy} The totals leave out the positions without a value.</span>
+              {onRetryPrices && (
+                <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />
+              )}
+            </div>
+          )}
           {/* Before vs After */}
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 12, marginBottom: 16 }}>
             <div style={cardStyle}>

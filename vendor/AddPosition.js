@@ -551,7 +551,9 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
     || (!txQuantity ? `Enter the ${qtyWord.toLowerCase()} to add` : null)
     || (!txPrice ? (selectedAsset && selectedAsset.isManual ? 'Enter the total value' : 'Enter the price') : null)
     || (loadingFX ? 'Loading the exchange rate…' : null)
-    || (exchangeRate == null && !saving ? (fxError || 'Waiting for the exchange rate — try again in a moment') : null);
+    // A rate that did not load is said once, by fxError in the total's card
+    // (with its reason): repeated here it was the same sentence twice.
+    || (exchangeRate == null && !saving ? (fxError ? null : 'Waiting for the exchange rate — try again in a moment') : null);
 
   // The holding's type: the search row's or the asset page's EODHD type
   // ("FUND", "ETF", "Common Stock"), else the type the prefill's own search

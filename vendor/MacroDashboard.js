@@ -1,5 +1,7 @@
 // Portfolio Tracker - Macro Dashboard Component (Concept 3 Glassmorphism Design)
-window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, totalReturn, annualReturn, onClose, theme, onRetryPrices }) => {
+// `pricesWhy`: why no position has a value, when the prices failed (the
+// shared words, Calc.unpricedWhy), else empty.
+window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, totalReturn, annualReturn, onClose, theme, onRetryPrices, pricesWhy }) => {
   const [macroData, setMacroData] = React.useState(null);
   const [treasuryRates, setTreasuryRates] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
@@ -310,8 +312,10 @@ window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, to
   const riskPremium = nominalReturn == null || !riskFreeKnown ? null : nominalReturn - riskFreeRate;
   const periodLabel = holdingDays == null
     ? 'no transactions yet'
+    // Prices that failed are named, with why: "no priced positions" read as
+    // a book with nothing to price under a quote feed at 500. Said so only when none is known.
     : !Number.isFinite(totalReturn)
-      ? 'no priced positions to measure'
+      ? (pricesWhy ? String(pricesWhy).charAt(0).toLowerCase() + String(pricesWhy).slice(1).replace(/\.$/, '') : 'no priced positions to measure')
     : holdingDays < 90
       ? `held ${holdingDays} days — too short to state an annual rate`
       : moneyWeighted
@@ -378,6 +382,17 @@ window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, to
                   )}</>)
                 : `Your portfolio ${realReturn >= 0 ? 'is growing' : 'is losing'} purchasing power at ${Math.abs(realReturn).toFixed(2)}% per year (${periodLabel}; ${cumulativeReturn >= 0 ? '+' : ''}${cumulativeReturn.toFixed(2)}% in total)`}
             </div>
+            {/* Some positions valued, some not for a failed request: the
+                return is of the valued ones, and says why the rest are not
+                in it, with Try again. */}
+            {Number.isFinite(totalReturn) && pricesWhy && (
+              <div data-unpriced-why="true" style={{ marginTop: 8, fontSize: 12, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+                <span role="status">{pricesWhy} The return leaves out the positions without a value.</span>
+                {onRetryPrices && (
+                  <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />
+                )}
+              </div>
+            )}
           </div>
 
           {/* vs Risk-Free Rate */}

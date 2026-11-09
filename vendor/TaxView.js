@@ -1,6 +1,6 @@
 // Tax View — Full-screen tax optimization view
 // FIFO/LIFO/AvgCost comparison, capital gains, harvesting, wash sales, CSV export
-window.TaxView = function TaxView({ portfolioId, holdings, holdingsData, baseCurrency, onClose, theme }) {
+window.TaxView = function TaxView({ portfolioId, holdings, holdingsData, baseCurrency, onClose, theme, onRetryPrices }) {
   const [method, setMethod] = React.useState('fifo');
   // Null until chosen: then the latest year with a sale in it (see below).
   const [chosenYear, setTaxYear] = React.useState(null);
@@ -84,6 +84,16 @@ window.TaxView = function TaxView({ portfolioId, holdings, holdingsData, baseCur
     });
     return prices;
   }, [holdings, holdingsData]);
+
+  // Why held positions have no value (a currency rate or a quote that did
+  // not load), in the shared words, or '': they cannot be candidates, and
+  // the list said nothing -- a GBP position $11M under its cost vanished
+  // from it when the GBP/USD rate failed.
+  const unpricedWhy = React.useMemo(() => {
+    const PC = window.PortfolioCalculations;
+    const rows = (holdings || []).map(h => holdingsData?.[h.id]).filter(Boolean);
+    return PC && PC.unpricedWhy ? PC.unpricedWhy(rows, baseCurrency || 'USD') : '';
+  }, [holdings, holdingsData, baseCurrency]);
 
   const harvestingCandidates = React.useMemo(
     () => Tax.getHarvestingCandidates(holdings || [], allTransactions, currentPrices),
@@ -282,8 +292,14 @@ window.TaxView = function TaxView({ portfolioId, holdings, holdingsData, baseCur
       ),
 
       // Section 3: Tax-Loss Harvesting
-      harvestingCandidates.length > 0 && React.createElement('div', { style: styles.card },
-        React.createElement(sectionTag, { style: styles.sectionTitle }, `Tax-Loss Harvesting (${harvestingCandidates.length} candidate${harvestingCandidates.length === 1 ? '' : 's'})`),
+      (harvestingCandidates.length > 0 || unpricedWhy) && React.createElement('div', { style: styles.card },
+        React.createElement(sectionTag, { style: styles.sectionTitle }, harvestingCandidates.length > 0 ? `Tax-Loss Harvesting (${harvestingCandidates.length} candidate${harvestingCandidates.length === 1 ? '' : 's'})` : 'Tax-Loss Harvesting'),
+        unpricedWhy && React.createElement('div', { 'data-unpriced-why': 'true', style: { fontSize: 12, lineHeight: 1.5, marginBottom: harvestingCandidates.length ? 4 : 0, color: isDark ? C3.textMutedDark : C3.textMutedLight } },
+          React.createElement('span', { role: 'status' }, unpricedWhy + ' The list leaves out the positions without a value.'),
+          onRetryPrices && window.RateLimitWait && window.RateLimitWait.RetryButton && React.createElement(window.RateLimitWait.RetryButton, {
+            busyKey: 'prices', isDark, onClick: onRetryPrices,
+            style: { marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" },
+          })),
         harvestingCandidates.slice(0, 10).map((c, i) =>
           React.createElement('div', {
             key: i,

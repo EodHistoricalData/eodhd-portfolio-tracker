@@ -27,8 +27,10 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   // touch: a coarse pointer counts as touch too.
   const isTouch = () => window.innerWidth <= 1024 || Boolean(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
   const [touchWidth, setTouchWidth] = React.useState(isTouch);
+  // The window's width, for the positions table (below).
+  const [viewWidth, setViewWidth] = React.useState(() => window.innerWidth || 1440);
   React.useEffect(() => {
-    const onResize = () => setTouchWidth(isTouch());
+    const onResize = () => { setTouchWidth(isTouch()); setViewWidth(window.innerWidth || 1440); };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
@@ -230,7 +232,8 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     const s = getWidgetSize(id);
     const now = s === 'compact' ? 'small' : s === 'full' ? 'large' : 'medium';
     const next = s === 'compact' ? 'medium' : s === 'full' ? 'small' : 'large';
-    return { 'aria-label': `${name} widget size: ${now}. Change to ${next}` };
+    // 17 px tall with a mouse: an invisible 24 px hit area (data-hit).
+    return { 'aria-label': `${name} widget size: ${now}. Change to ${next}`, 'data-hit': '' };
   };
   // "Customize" closes on Escape, and the focus goes back to its button.
   const customizeRef = React.useRef(null);
@@ -589,7 +592,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
       // No portfolio selected is no positions on screen -- not the last
       // portfolio's, already deleted.
       priceSeqRef.current++;
-      priceStoreRef.current = { key: null, quotes: {}, eod: {}, rates: {}, draw: null, at: null };
+      priceStoreRef.current = { key: null, quotes: {}, eod: {}, rates: {}, rateFails: {}, priceFailBy: {}, noRecord: {}, draw: null, at: null };
       setHoldings([]);
       setHoldingsData({});
     }
@@ -614,10 +617,14 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     }
     // Calc.fxRates maps minor units (GBX -> GBP/100) and treats "NA" as
     // missing; a missing rate stays null.
-    const rates = await Calc.fxRates(apiKey, baseCurrency, currencies);
+    // What a rate that did not come threw, by currency (`_fails`, not
+    // enumerable): the positions it leaves unvalued say why.
+    const failsBy = {};
+    const rates = await Calc.fxRates(apiKey, baseCurrency, currencies, failsBy);
     for (const [currency, rate] of Object.entries(rates)) {
       if (currency !== baseCurrency && rate) Storage.setCachedForexRate(currency, baseCurrency, rate);
     }
+    Object.defineProperty(rates, '_fails', { value: failsBy, enumerable: false });
     if (isCurrent()) setForexRates(rates);
     return rates;
   };
@@ -633,7 +640,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   // dropped the first request's answer when it came: prices stayed N/A.
   // An answer is kept if it is newer than the one
   // held, a failure never takes a price away, and the latest load draws.
-  const priceStoreRef = React.useRef({ key: null, quotes: {}, eod: {}, rates: {}, draw: null, at: null });
+  const priceStoreRef = React.useRef({ key: null, quotes: {}, eod: {}, rates: {}, rateFails: {}, priceFailBy: {}, noRecord: {}, draw: null, at: null });
   // The templates dialog takes the focus when it opens and closes on Escape
   // wherever the focus is: opened with the mouse, the focus stayed on the
   // page behind and Escape did nothing.
@@ -641,6 +648,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   const catalogDialogRef = React.useRef(null);
   (window.ModalLayer ? window.ModalLayer.useLayer : () => {})(catalogDialogRef, showCatalog);
   const restoreInputRef = React.useRef(null);
+  const restoreButtonRef = React.useRef(null);
   React.useEffect(() => {
     if (!showCatalog) return undefined;
     // The button pressed, also where Safari left the focus on <body>.
@@ -720,7 +728,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     // One store per portfolio, currency and key; another starts afresh.
     const storeKey = `${activePortfolio?.id || activePortfolioId || ''}|${baseCurrency}|${apiKey || ''}`;
     if (priceStoreRef.current.key !== storeKey) {
-      priceStoreRef.current = { key: storeKey, quotes: {}, eod: {}, rates: {}, draw: null, at: null };
+      priceStoreRef.current = { key: storeKey, quotes: {}, eod: {}, rates: {}, rateFails: {}, priceFailBy: {}, noRecord: {}, draw: null, at: null };
     }
     const store = priceStoreRef.current;
     // Until this load draws, a late answer waits in the store for it.
@@ -728,7 +736,13 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     // Asked together with the quotes, not before them: both share the wait.
     const ratesAsked = Promise.resolve().then(() => loadForexRates(holdingsList, baseCurrency, current));
     const takeRates = (r) => {
-      Object.entries(r || {}).forEach(([c, v]) => { if (Calc.toRate(v) != null) store.rates[c] = v; });
+      Object.entries(r || {}).forEach(([c, v]) => { if (Calc.toRate(v) != null) { store.rates[c] = v; delete store.rateFails[c]; } });
+      // A rate that did not come, and why (the limit, EODHD's error, a
+      // dropped connection, an answer that could not be read): the footer
+      // said only "1 without a price".
+      Object.entries((r && r._fails) || {}).forEach(([c, list]) => {
+        if (store.rates[c] == null) store.rateFails[c] = RLW.outage(list);
+      });
     };
     const rateOf = (c) => (c === baseCurrency ? 1 : store.rates[c]);
     // Answers that come after the wait, from this load or an older one of
@@ -774,6 +788,11 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     // refusal five more times. Those symbols stay unpriced until the next load.
     let quotesRefused = false;
     let firstFail = null;
+    // What each symbol's last request threw, cleared by its own answer: a
+    // batch's 500 stayed after the single requests had answered, and was
+    // blamed on a ticker that answered "no data".
+    const failBy = {};
+    store.noRecord = {};
     const symbols = [...new Set(holdingsList.filter(h => h.symbol && h.type !== 'manual').map(h => h.symbol))];
     if (symbols.length > 1 && window.EODHD_API.getBatchRealTime) {
       for (let i = 0; i < symbols.length; i += 50) {
@@ -783,7 +802,10 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
         const got = await within(asked, left());
         if (got.done) {
           Object.entries(got.value || {}).forEach(([code, q]) => { if (takeQuote(code, q)) answered++; });
-          if (!answered && got.value && got.value._failed) firstFail = firstFail || got.value._failed;
+          if (!answered && got.value && got.value._failed) {
+            firstFail = firstFail || got.value._failed;
+            symbols.slice(i, i + 50).forEach((s) => { failBy[s] = got.value._failed; });
+          }
         } else {
           late.push(asked.then(batch => { Object.entries(batch || {}).forEach(([code, q]) => takeQuote(code, q)); }, () => {}));
         }
@@ -806,14 +828,19 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
       await Promise.all(missing.map(async sym => {
         // With its status, so a failure can be named; inside the limit's
         // wait the last price stays, as the client keeps it.
+        let threw = false;
         const asked = Promise.resolve().then(() => window.EODHD_API.getRealTimeData(apiKey, sym, { throwErrors: true })).catch((e) => {
+          threw = true;
+          failBy[sym] = e || {};
           firstFail = firstFail || e || {};
           const A = window.EODHD_API;
           return e && e.rateLimited && A && A._lastQuote && A._lastQuote.get ? (A._lastQuote.get(sym) || null) : null;
         });
+        // An answer of its own clears what the batch failed with.
+        const answeredNow = () => { if (!threw) { delete failBy[sym]; delete store.priceFailBy[sym]; } };
         const got = await within(asked, left());
-        if (got.done) takeQuote(sym, got.value);
-        else late.push(asked.then(q => { takeQuote(sym, q); }, () => {}));
+        if (got.done) { answeredNow(); takeQuote(sym, got.value); }
+        else late.push(asked.then(q => { answeredNow(); takeQuote(sym, q); }, () => {}));
       }));
       if (!current()) return;
     }
@@ -849,17 +876,31 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     // A quote that came after the wait with "NA" in it gets its stand-in
     // close then: it is a late answer like any other.
     const eodAsked = new Set();
+    // The history answered with no close either: there is no price on
+    // record for it -- an answer, not a failure.
+    const eodAnswered = (sym, eod) => {
+      takeEod(sym, eod);
+      const c = lastClose[sym];
+      if (Array.isArray(eod) && !(c && (c.close != null || c.previousClose != null))) store.noRecord[sym] = true;
+    };
     lateEod = () => Promise.all(symbols.filter(sym => quotedNA(sym) && !eodAsked.has(sym))
-      .map(sym => { eodAsked.add(sym); return askEod(sym).then(eod => { takeEod(sym, eod); }, () => {}); }));
+      .map(sym => { eodAsked.add(sym); return askEod(sym).then(eod => { eodAnswered(sym, eod); }, () => {}); }));
     const needsEod = symbols.filter(quotedNA);
     needsEod.forEach(sym => eodAsked.add(sym));
     await Promise.all(needsEod.map(async sym => {
       const asked = askEod(sym);
       const got = await within(asked, left());
-      if (got.done) takeEod(sym, got.value);
-      else late.push(asked.then(eod => { takeEod(sym, eod); }, () => {}));
+      if (got.done) eodAnswered(sym, got.value);
+      else late.push(asked.then(eod => { eodAnswered(sym, eod); }, () => {}));
     }));
     if (!current()) return;
+
+    // The quotes' failure, for the positions it leaves unpriced: an outage
+    // only (the limit, EODHD's error, no answer, unreadable); a 404 is a
+    // code the feed does not know.
+    // By symbol, each its own (failBy).
+    store.priceFailBy = {};
+    Object.keys(failBy).forEach((s) => { const f = RLW.outage(failBy[s]); if (f) store.priceFailBy[s] = f; });
 
     const gotRates = await within(ratesAsked, left());
     if (gotRates.done) takeRates(gotRates.value);
@@ -881,6 +922,9 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
           const basis = Calc.getCostBasisWithFX(transactions);
           data[holding.id] = {
             priceUnavailable: true, fxUnavailable: true,
+            // Why the rate did not come, when it failed (Calc.unpricedWhy).
+            fxFail: store.rateFails[holdingCurrency] || null,
+            symbol: holding.symbol,
             quantity: Calc.getHoldingQuantity(transactions),
             avgCostPerShare: basis.avgCostPerShare,
             avgCostPerShareInAsset: basis.avgCostPerShareInAsset,
@@ -921,6 +965,11 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
             const basis = Calc.getCostBasisWithFX(transactions);
             data[holding.id] = {
               priceUnavailable: true,
+              // Why its quote did not come, when it failed; or that it
+              // answered with no price on record (Calc.unpricedWhy).
+              priceFail: store.priceFailBy[holding.symbol] || null,
+              noRecord: Boolean(store.noRecord[holding.symbol]),
+              symbol: holding.symbol,
               quantity: Calc.getHoldingQuantity(transactions),
               avgCostPerShare: basis.avgCostPerShare,
               avgCostPerShareInAsset: basis.avgCostPerShareInAsset,
@@ -950,7 +999,11 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     };
     store.draw = draw;
     draw();
-    setPricesFail(firstFail ? RLW.failure(firstFail) : null);
+    // The failure of a symbol still without a price, not of one that
+    // answered since.
+    const pricedNow = (sym) => priced(quoteOf(sym)) || Boolean(lastClose[sym] && (lastClose[sym].close != null || lastClose[sym].previousClose != null));
+    const stillFailing = symbols.find((sym) => failBy[sym] && !pricedNow(sym));
+    setPricesFail(stillFailing ? RLW.failure(failBy[stillFailing]) : null);
     setLoading(false);
     RLW.endBusy('prices', busyToken);
   };
@@ -1132,7 +1185,20 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   // panel: left as before.
   const pricesWhy = !pricesLimited && pricesFail && !pricesFail.limited
     && (pricesFail.unreadable || pricesFail.status >= 500 || pricesFail.status === 0) ? RLW.failReason(pricesFail) : null;
-  const noPricesWords = pricesLimited ? 'No prices came back: ' + RLW.REACHED : pricesWhy ? 'No prices came back: ' + pricesWhy : 'No prices came back.';
+  // A position whose currency's rate did not load has no value either: the
+  // rate is named, with its reason (Calc.unpricedWhy). The footer said "1
+  // without a price" and nothing else. The quotes'
+  // reason above is said only where a quote is what is missing.
+  const rateWhy = [Calc.unpricedWhy(openUnpriced, activePortfolio?.baseCurrency || 'USD', { ratesOnly: true }), Calc.noRecordWhy(openUnpriced)].filter(Boolean).join(' ');
+  // A quote missing for a failure or with nothing known: not a rate, and not
+  // a ticker that answered with no price on record.
+  const quoteMissing = openUnpriced.some(h => !h.fxUnavailable && !h.noRecord);
+  const withRateWhy = (words) => (rateWhy ? (words ? words.replace(/\.?$/, '.') + ' ' : '') + rateWhy : words);
+  const noPricesWords = !quoteMissing && rateWhy ? rateWhy
+    : withRateWhy(pricesLimited ? 'No prices came back: ' + RLW.REACHED : pricesWhy ? 'No prices came back: ' + pricesWhy : 'No prices came back.');
+  // "· N without a price", and why: the quotes' reason where a quote is
+  // missing, a rate's where a rate is.
+  const unpricedWords = withRateWhy(`${unpricedCount} without a price` + (quoteMissing && (pricesLimited || pricesWhy) ? ': ' + (pricesLimited ? RLW.REACHED : pricesWhy) : ''));
   const totalValue = Calc.getTotalValue(pricedHoldings);
   const totalCost = Calc.getTotalCost(pricedHoldings);
   const { pnl, pnlPercent } = Calc.getTotalPnL(pricedHoldings);
@@ -1371,6 +1437,10 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     // Symbol column pinned while the 1,100 px positions table scrolls: at
     // 390 px every P&L column was off-screen next to rows with no symbol in
     // view. Opaque, so scrolled cells pass under it.
+    // The positions table's cells: 8 px each side. With 12 and the web's
+    // type, the table was wider than its card at 1440 and Actions was cut
+    // off until scrolled.
+    const cellPad = '10px 8px';
     const stickyKey = { position: 'sticky', left: 0, zIndex: 1, background: isDark ? '#1C1A14' : '#ffffff' };
 
     return (
@@ -1528,15 +1598,25 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
               </div>
             ) : (
             <div data-retry-focus="" style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }} tabIndex={0} role="region" aria-label="Positions (scrolls sideways)">
-              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1100 }}>
+              {/* From 1200 px the table is fitted into its card (cells
+                  may wrap). Narrower it scrolls sideways anyway, so it
+                  takes its natural width: squeezed to 1000 px, Edit and
+                  History went one under the other and a row grew three
+                  times as tall at 390. */}
+              <table style={viewWidth < 1200 ? { width: 'max-content', minWidth: '100%', borderCollapse: 'collapse' } : { width: '100%', borderCollapse: 'collapse', minWidth: 1000 }}>
                 <thead>
                   <tr>
                     {['Symbol', 'Name', 'Shares', 'Avg Cost', 'Last Price', 'Day Chg', 'Day P&L', 'Total P&L', 'P&L %', 'Market Value', 'Weight', 'Actions'].map((col, ci) => (
                       <th key={ci} style={{
                         background: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', fontSize: 10, fontWeight: 700,
                         textTransform: 'uppercase', letterSpacing: '0.06em', color: isDark ? 'rgba(255,255,255,0.65)' : 'rgba(0,0,0,0.65)',
-                        padding: '10px 12px', textAlign: ci < 2 ? 'left' : ci === 11 ? 'center' : 'right',
-                        whiteSpace: 'nowrap', borderBottom: `1px solid ${bd}`,
+                        padding: cellPad, textAlign: ci < 2 ? 'left' : ci === 11 ? 'center' : 'right',
+                        // On a wide screen a heading goes on two lines rather
+                        // than push Actions out of the card (MARKET / VALUE).
+                        // Narrower, the table scrolls sideways anyway: on one
+                        // line, as before (at 390 AVG / COST went on two and
+                        // the first row under the screen's edge).
+                        whiteSpace: ci === 0 || viewWidth < 1200 ? 'nowrap' : 'normal', verticalAlign: 'bottom', borderBottom: `1px solid ${bd}`,
                         ...(ci === 0 ? stickyKey : null),
                       }}>{col}</th>
                     ))}
@@ -1550,9 +1630,9 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                     if (loading && !holdingsData[h.id]) {
                       return (
                         <tr key={h.id}>
-                          <td style={{ padding: '10px 12px', textAlign: 'left', fontFamily: "'Sora', sans-serif", fontWeight: 700, fontSize: 13, borderBottom: `1px solid ${bd}`, whiteSpace: 'nowrap', ...stickyKey }}>{(h.symbol || '').split('.')[0]}</td>
-                          <td style={{ padding: '10px 12px', textAlign: 'left', fontFamily: "'Sora', sans-serif", fontSize: 12, color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.55)', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>{h.name || h.symbol}</td>
-                          <td colSpan={10} style={{ padding: '10px 12px', textAlign: 'left', fontFamily: "'Sora', sans-serif", fontSize: 12, color: isDark ? 'rgba(255,255,255,0.62)' : 'rgba(0,0,0,0.6)', borderBottom: `1px solid ${bd}` }}>Loading…</td>
+                          <td style={{ padding: cellPad, textAlign: 'left', fontFamily: "'Sora', sans-serif", fontWeight: 700, fontSize: 13, borderBottom: `1px solid ${bd}`, whiteSpace: 'nowrap', ...stickyKey }}>{(h.symbol || '').split('.')[0]}</td>
+                          <td style={{ padding: cellPad, textAlign: 'left', fontFamily: "'Sora', sans-serif", fontSize: 12, color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.55)', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>{h.name || h.symbol}</td>
+                          <td colSpan={10} style={{ padding: cellPad, textAlign: 'left', fontFamily: "'Sora', sans-serif", fontSize: 12, color: isDark ? 'rgba(255,255,255,0.62)' : 'rgba(0,0,0,0.6)', borderBottom: `1px solid ${bd}` }}>Loading…</td>
                         </tr>
                       );
                     }
@@ -1587,7 +1667,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                         onMouseEnter={e => { e.currentTarget.style.background = isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.03)'; e.currentTarget.querySelector('td').style.color = '#f97316'; }}
                         onMouseLeave={e => { e.currentTarget.style.background = ''; e.currentTarget.querySelector('td').style.color = tc; }}
                       >
-                        <td style={{ padding: '10px 12px', textAlign: 'left', fontFamily: "'Sora', sans-serif", fontWeight: 700, fontSize: 13, borderBottom: `1px solid ${bd}`, whiteSpace: 'nowrap', transition: 'color 0.12s', cursor: h.symbol && h.type !== 'manual' && onSelectAsset ? 'pointer' : 'default', ...stickyKey }}
+                        <td style={{ padding: cellPad, textAlign: 'left', fontFamily: "'Sora', sans-serif", fontWeight: 700, fontSize: 13, borderBottom: `1px solid ${bd}`, whiteSpace: 'nowrap', transition: 'color 0.12s', cursor: h.symbol && h.type !== 'manual' && onSelectAsset ? 'pointer' : 'default', ...stickyKey }}
                           // Keyboard-reachable when it opens something.
                           {...(h.symbol && h.type !== 'manual' && onSelectAsset ? {
                             role: 'button', tabIndex: 0, 'aria-label': 'Open ' + (h.name || h.symbol),
@@ -1600,9 +1680,9 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                             {(h.symbol || '').split('.')[0]}
                           </span>
                         </td>
-                        <td style={{ padding: '10px 12px', textAlign: 'left', fontFamily: "'Sora', sans-serif", fontSize: 12, color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.55)', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>{h.name || h.symbol}</td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>{Calc.formatQuantity(shares, h)}</td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>{(() => {
+                        <td style={{ padding: cellPad, textAlign: 'left', fontFamily: "'Sora', sans-serif", fontSize: 12, color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.55)', borderBottom: '1px solid rgba(255,255,255,0.08)' }}><div style={{ minWidth: 84, maxWidth: 220, lineHeight: 1.35, overflowWrap: 'anywhere' }}>{h.name || h.symbol}</div></td>
+                        <td style={{ padding: cellPad, textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>{Calc.formatQuantity(shares, h)}</td>
+                        <td style={{ padding: cellPad, textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>{(() => {
                           // Bought in the instrument's currency, so said in it; the
                           // portfolio-currency figure the other columns use sits
                           // under it, named.
@@ -1611,29 +1691,38 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                           if (!(own && base && own !== base) || !Number.isFinite(inAsset)) return Calc.formatCurrency(avgCost, base);
                           return (<>
                             <div>{Calc.formatCurrency(inAsset, own)}</div>
-                            <div data-avg-base="true" style={{ fontSize: 11, opacity: 0.7 }}>{Calc.formatCurrency(avgCost, base)} in {base}</div>
+                            {/* Under 1400 px "in USD" may go under its figure: kept on
+                                one line it set the column's width, and with a GBX
+                                position the table was 20-27 px wider than its card at
+                                1280 (Edit and History cut). Wider, it
+                                fits on one line, as before. */}
+                            <div data-avg-base="true" style={{ fontSize: 11, opacity: 0.7, whiteSpace: viewWidth < 1400 ? 'normal' : 'nowrap' }}><span style={{ whiteSpace: 'nowrap' }}>{Calc.formatCurrency(avgCost, base)}</span> {'in\u00A0' + base}</div>
                           </>);
                         })()}</td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>{Calc.formatCurrency(price == null ? null : price * (d.exchangeRate || 1), activePortfolio?.baseCurrency)}</td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', color: dayColor }}>{dayChgPct == null ? 'N/A' : (dayChgPct > 0 ? '+' : '') + dayChgPct.toFixed(2) + '%'}</td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', color: signColor(dayPnl), whiteSpace: 'nowrap' }}>{dayPnl == null ? 'N/A' : <>{dayPnl > 0 ? '+' : ''}{Calc.formatCurrency(dayPnl, activePortfolio?.baseCurrency)}</>}</td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', color: signColor(totalPnl), whiteSpace: 'nowrap' }}>{totalPnl > 0 ? '+' : ''}{Calc.formatCurrency(totalPnl, activePortfolio?.baseCurrency)}</td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-                          <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 3, fontSize: 11, fontFamily: "'Roboto Mono', monospace", fontWeight: 500, color: signColor(totalPnlPct), background: (totalPnlPct == null || totalPnlPct === 0) ? 'transparent' : totalPnlPct > 0 ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)' }}>{totalPnlPct == null ? 'N/A' : (totalPnlPct > 0 ? '+' : '') + totalPnlPct.toFixed(1) + '%'}</span>
+                        <td style={{ padding: cellPad, textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>{Calc.formatCurrency(price == null ? null : price * (d.exchangeRate || 1), activePortfolio?.baseCurrency)}</td>
+                        <td style={{ padding: cellPad, textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', color: dayColor }}>{dayChgPct == null ? 'N/A' : (dayChgPct > 0 ? '+' : '') + dayChgPct.toFixed(2) + '%'}</td>
+                        <td style={{ padding: cellPad, textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', color: signColor(dayPnl), whiteSpace: 'nowrap' }}>{dayPnl == null ? 'N/A' : <>{dayPnl > 0 ? '+' : ''}{Calc.formatCurrency(dayPnl, activePortfolio?.baseCurrency)}</>}</td>
+                        <td style={{ padding: cellPad, textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', color: signColor(totalPnl), whiteSpace: 'nowrap' }}>{totalPnl > 0 ? '+' : ''}{Calc.formatCurrency(totalPnl, activePortfolio?.baseCurrency)}</td>
+                        <td style={{ padding: cellPad, textAlign: 'right', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                          <span style={{ display: 'inline-block', padding: '2px 6px', borderRadius: 3, fontSize: 11, fontFamily: "'Roboto Mono', monospace", fontWeight: 500, color: signColor(totalPnlPct), background: (totalPnlPct == null || totalPnlPct === 0) ? 'transparent' : totalPnlPct > 0 ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)' }}>{totalPnlPct == null ? 'N/A' : (totalPnlPct > 0 ? '+' : '') + totalPnlPct.toFixed(1) + '%'}</span>
                         </td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 13, fontWeight: 500, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>{Calc.formatCurrency(mktVal, activePortfolio?.baseCurrency)}</td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end' }}>
+                        <td style={{ padding: cellPad, textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, fontWeight: 600, borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>{Calc.formatCurrency(mktVal, activePortfolio?.baseCurrency)}</td>
+                        <td style={{ padding: cellPad, textAlign: 'right', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '4px 8px', justifyContent: 'flex-end' }}>
                             {/* No value is no weight: an unpriced row read 0.0%
                                 beside its N/A columns. */}
                             <span style={{ fontFamily: "'Roboto Mono', monospace", fontSize: 12 }}>{mktVal == null ? 'N/A' : weight.toFixed(1) + '%'}</span>
-                            <div style={{ width: 52, height: 5, background: 'rgba(255,255,255,0.06)', borderRadius: 2, overflow: 'hidden' }}>
+                            <div style={{ width: 40, height: 5, background: 'rgba(255,255,255,0.06)', borderRadius: 2, overflow: 'hidden' }}>
                               <div style={{ height: '100%', background: C3.logoGradient, borderRadius: 2, width: `${Math.min(weight * 4, 100)}%` }}></div>
                             </div>
                           </div>
                         </td>
-                        <td style={{ padding: '10px 12px', textAlign: 'center', whiteSpace: 'nowrap', borderBottom: `1px solid ${bd}` }}>
-                          <button data-hit="" data-pt-edit={h.id} onClick={() => setEditHolding(h)} style={{ color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.62)', fontSize: 11, fontFamily: "'Sora', sans-serif", fontWeight: 600, cursor: 'pointer', border: `1px solid ${bd}`, padding: '4px 10px', borderRadius: 3, background: 'none', transition: 'color 150ms ease, border-color 150ms ease' }}
+                        <td style={{ padding: cellPad, textAlign: 'center', borderBottom: `1px solid ${bd}` }}>
+                          {/* Side by side, or one under the other where the
+                              column is narrow -- with a gap, so each keeps
+                              its own 24 px to press (Edit's lay under History). */}
+                          <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '6px' }}>
+                          <button data-hit="" data-pt-edit={h.id} onClick={() => setEditHolding(h)} style={{ color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.62)', fontSize: 11, fontFamily: "'Sora', sans-serif", fontWeight: 600, cursor: 'pointer', border: `1px solid ${bd}`, padding: '4px 8px', borderRadius: 3, background: 'none', transition: 'color 150ms ease, border-color 150ms ease' }}
                             onMouseEnter={e => { e.target.style.color = '#f97316'; e.target.style.borderColor = 'rgba(249,115,22,0.3)'; }}
                             onMouseLeave={e => { e.target.style.color = isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.62)'; e.target.style.borderColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'; }}
                           >Edit</button>
@@ -1642,10 +1731,11 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                               -- dividend, split, transfers -- were reachable
                               only from the phone layout, which the web build
                               never renders. */}
-                          <button data-hit="" onClick={() => { setSelectedHolding(h); setShowTransactionHistory(true); }} style={{ marginLeft: 6, color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.62)', fontSize: 11, fontFamily: "'Sora', sans-serif", fontWeight: 600, cursor: 'pointer', border: `1px solid ${bd}`, padding: '4px 10px', borderRadius: 3, background: 'none', transition: 'color 150ms ease, border-color 150ms ease' }}
+                          <button data-hit="" onClick={() => { setSelectedHolding(h); setShowTransactionHistory(true); }} style={{ color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.62)', fontSize: 11, fontFamily: "'Sora', sans-serif", fontWeight: 600, cursor: 'pointer', border: `1px solid ${bd}`, padding: '4px 8px', borderRadius: 3, background: 'none', transition: 'color 150ms ease, border-color 150ms ease' }}
                             onMouseEnter={e => { e.target.style.color = '#f97316'; e.target.style.borderColor = 'rgba(249,115,22,0.3)'; }}
                             onMouseLeave={e => { e.target.style.color = isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.62)'; e.target.style.borderColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'; }}
                           >History</button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -1668,7 +1758,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
               <span>{(() => {
                 const again = <RLW.RetryButton wait={rlWait} busyKey="prices" isDark={isDark} onClick={retryPrices} style={{ marginLeft: 6, padding: '3px 10px', borderRadius: 3, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: tc, fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />;
                 const words = loading ? 'Loading prices…'
-                  : pricesUpdatedAt ? 'Prices as of ' + pricesUpdatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' }) + (unpricedCount > 0 ? ` · ${unpricedCount} without a price` : '')
+                  : pricesUpdatedAt ? 'Prices as of ' + pricesUpdatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' }) + (unpricedCount > 0 ? ` · ${unpricedWords}` : '')
                   : noneValued ? noPricesWords : '';
                 // The words are the live region; the held press's note counts
                 // every second and stays outside it.
@@ -1773,7 +1863,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                 {insightsError && (
                   <div style={{ marginBottom: 8, padding: '8px 10px', borderRadius: 4, border: '1px solid rgba(239,68,68,0.3)', background: 'rgba(239,68,68,0.06)', color: acc('#ef4444'), fontSize: 12, display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'flex-start' }}>
                     <span style={{ flex: 1, lineHeight: 1.4 }}>{insightsError}</span>
-                    <button aria-label="Dismiss error" onClick={() => setInsightsError('')} style={{ background: 'none', border: 'none', color: acc('#ef4444'), opacity: 0.7, cursor: 'pointer', fontSize: 13, padding: 0, lineHeight: 1 }}>×</button>
+                    <button data-hit="" aria-label="Dismiss error" onClick={() => setInsightsError('')} style={{ background: 'none', border: 'none', color: acc('#ef4444'), opacity: 0.7, cursor: 'pointer', fontSize: 13, padding: 0, lineHeight: 1 }}>×</button>
                   </div>
                 )}
                 {holdings.length === 0 ? (
@@ -1921,7 +2011,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
                     <span style={{ fontSize: 12, fontWeight: 600, color: ink(0.5) }}>AI Chat</span>
-                    <button aria-label="Close AI chat" onClick={() => { setShowAIChat(false); setChatPrompt(null); }} style={{ background: 'none', border: 'none', color: ink(0.3), cursor: 'pointer', fontSize: 14 }}>x</button>
+                    <button data-hit="" aria-label="Close AI chat" onClick={() => { setShowAIChat(false); setChatPrompt(null); }} style={{ background: 'none', border: 'none', color: ink(0.3), cursor: 'pointer', fontSize: 14 }}>x</button>
                   </div>
                   {React.createElement(window.AIChatView, {
                     key: chatPrompt ? 'prompt-' + chatPrompt.n : 'chat',
@@ -1979,7 +2069,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
           <div style={{ background: 'rgba(255,255,255,0.02)', border: `1px solid ${bd}`, borderRadius: 4, padding: 20 }}>
             {React.createElement(window.TaxView, {
               portfolioId: activePortfolioId, holdings, holdingsData,
-              baseCurrency: activePortfolio?.baseCurrency || 'USD',
+              baseCurrency: activePortfolio?.baseCurrency || 'USD', onRetryPrices: retryPrices,
               // Back goes to Overview, and so does the focus: it was left on
               // <body> with the arrow gone.
               onClose: () => { setWebTab('overview'); setTimeout(() => { try { const tab = document.querySelector('[role="tablist"] [data-tab="overview"]'); if (tab) tab.focus(); } catch (_) {} }, 0); }, theme,
@@ -1998,7 +2088,10 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
               // "+0.87% a year" here.
               totalValue, totalReturn: noneValued ? null : totalReturnPercent, // the header's figure, not open-lot P&L
               annualReturn: !noneValued && moneyWeighted ? moneyWeighted.annual : null, // money-weighted (IRR)
-              onRetryPrices: noneValued ? retryPrices : null,
+              // Why a held position has no value, when a request failed --
+              // none of them or some -- and Try again.
+              onRetryPrices: unpricedCount > 0 ? retryPrices : null,
+              pricesWhy: Calc.unpricedWhy(openUnpriced, activePortfolio?.baseCurrency || 'USD'),
               onClose: () => setWebTab('overview'), theme,
             })}
           </div>
@@ -2164,7 +2257,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                 {/* A button that opens the hidden picker: a <label> around the
                     input could not be reached with Tab -- the
                     same fix as Import CSV's file zone. */}
-                <button type="button" onClick={() => restoreInputRef.current && restoreInputRef.current.click()} style={{ ...styles.button, background: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', color: tc, width: '100%', justifyContent: 'center', cursor: 'pointer', boxSizing: 'border-box' }}>
+                <button type="button" onClick={() => restoreInputRef.current && restoreInputRef.current.click()} ref={restoreButtonRef} style={{ ...styles.button, background: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', color: tc, width: '100%', justifyContent: 'center', cursor: 'pointer', boxSizing: 'border-box' }}>
                   <Icon name="upload" size={18} /> Restore from Backup…
                 </button>
                   <input ref={restoreInputRef} type="file" accept="application/json,.json" tabIndex={-1} aria-hidden="true" style={{ display: 'none' }} onChange={(e) => {
@@ -2180,7 +2273,11 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                       // came first, so "Replace everything?" was asked of {}.
                       const problem = Storage.checkBackup(parsed);
                       if (problem) { setBackupNote({ error: true, text: problem }); return; }
-                      const go = await askInPage({ title: 'Replace everything with the backup?', text: 'Every portfolio, position and transaction in this browser is replaced with the backup. What is here now is lost unless you exported it.', confirmLabel: 'Replace', danger: true, isDark });
+                      // Cancel, Escape or a click beside it: the focus back on
+                      // Restore in Settings, which stays open. The file picker
+                      // came between, so the focus at the question is not it
+                      // (Safari does not focus a clicked button at all).
+                      const go = await askInPage({ title: 'Replace everything with the backup?', text: 'Every portfolio, position and transaction in this browser is replaced with the backup. What is here now is lost unless you exported it.', confirmLabel: 'Replace', danger: true, isDark, restoreFocus: () => restoreButtonRef.current });
                       if (!go) return;
                       try {
                         const n = Storage.restoreBackup(parsed);
@@ -2340,7 +2437,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
               const shown = (!loading || retrying) && unpricedCount > 0;
               return (
                 <div style={shown ? { fontSize: 13, marginTop: 8, color: isDark ? C3.textMutedDark : C3.textMutedLight } : undefined}>
-                  <span role="status" aria-live="polite" data-pt-price-status="true">{shown ? (loading ? 'Loading prices…' : noneValued ? noPricesWords : `${unpricedCount} of ${holdings.length} positions ${unpricedCount === 1 ? 'has' : 'have'} no price${pricesLimited ? ': ' + RLW.REACHED : pricesWhy ? ': ' + pricesWhy : '.'}`) : ''}</span>
+                  <span role="status" aria-live="polite" data-pt-price-status="true">{shown ? (loading ? 'Loading prices…' : noneValued ? noPricesWords : withRateWhy(`${unpricedCount} of ${holdings.length} positions ${unpricedCount === 1 ? 'has' : 'have'} no price${quoteMissing && pricesLimited ? ': ' + RLW.REACHED : quoteMissing && pricesWhy ? ': ' + pricesWhy : '.'}`)) : ''}</span>
                   {shown && rlWait.note ? <span data-wait-note="true">{` ${rlWait.note}`}</span> : null}
                   {shown && <RLW.RetryButton wait={rlWait} busyKey="prices" isDark={isDark} onClick={retryPrices} style={{ marginLeft: 8, padding: '6px 12px', minHeight: 32, borderRadius: 8, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 13, fontWeight: 600, cursor: 'pointer' }} />}
                 </div>
@@ -2445,16 +2542,21 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                 </div>
               ))}
             </div>
-            {Object.keys(forexRates).length > 1 && (
-              <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}` }}>
-                <div style={{ fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
-                  FX Rates: {Object.entries(forexRates)
-                    .filter(([curr]) => curr !== activePortfolio?.baseCurrency)
-                    .map(([curr, rate]) => `${curr}/${activePortfolio?.baseCurrency}: ${rate.toFixed(4)}`)
-                    .join(' • ')}
+            {/* The rates that came, each a number: a rate that failed is null (its
+               failure is named in the line above), and rate.toFixed threw on it --
+               the whole portfolio went to "could not be drawn" in the Mini App when
+               a position's currency rate failed. */}
+            {(() => {
+              const base = activePortfolio?.baseCurrency;
+              const shown = Object.entries(forexRates).filter(([curr, rate]) => curr !== base && Number.isFinite(Number(rate)) && Number(rate) > 0);
+              return shown.length > 0 && (
+                <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}` }}>
+                  <div style={{ fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+                    FX Rates: {shown.map(([curr, rate]) => `${curr}/${base}: ${Number(rate).toFixed(4)}`).join(' • ')}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
         )}
 
@@ -2867,6 +2969,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
             holdings: holdings,
             holdingsData: holdingsData,
             baseCurrency: activePortfolio?.baseCurrency || 'USD',
+            onRetryPrices: retryPrices,
             onClose: () => setShowTaxView(false),
             theme: theme
           })}
@@ -2883,7 +2986,8 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
             totalValue: totalValue,
             totalReturn: noneValued ? null : totalReturnPercent, // the header's figure, not open-lot P&L
               annualReturn: !noneValued && moneyWeighted ? moneyWeighted.annual : null, // money-weighted (IRR)
-            onRetryPrices: noneValued ? retryPrices : null,
+            onRetryPrices: unpricedCount > 0 ? retryPrices : null,
+            pricesWhy: Calc.unpricedWhy(openUnpriced, activePortfolio?.baseCurrency || 'USD'),
             onClose: () => setShowMacroDashboard(false),
             theme: theme
           })}

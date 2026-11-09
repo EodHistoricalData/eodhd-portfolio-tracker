@@ -414,14 +414,30 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
                 <p style={{ margin: 0, padding: '8px 0', fontSize: 14, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
                   {/* The words are the live region; the button counts the
                       wait every second and stays outside it. */}
+                  {/* And why none came, when that is known: a rate that did
+                      not load, the quotes' failure. */}
                   <span role="status">{scoreState === 'loading' ? 'Loading prices…'
-                    : scoreState === 'unpriced' ? 'No score yet — it needs current prices, and none came back for these positions.'
+                    : scoreState === 'unpriced' ? 'No score yet — it needs current prices, and none came back for these positions.' + ((() => { const w = window.PortfolioCalculations && window.PortfolioCalculations.unpricedWhy ? window.PortfolioCalculations.unpricedWhy(positions, baseCurrency || 'USD') : ''; return w ? ' ' + w : ''; })())
                     : 'No score yet — these positions have no shares. Add your purchases to get a score.'}</span>
                   {scoreState === 'unpriced' && onRetryPrices && (
                     <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />
                   )}
                 </p>
               )}
+              {/* Scored on what has a value; a position left without one by
+                  a failed request is named, with Try again. */}
+              {scoreState === 'ok' && (() => {
+                const w = window.PortfolioCalculations && window.PortfolioCalculations.unpricedWhy ? window.PortfolioCalculations.unpricedWhy(positions, baseCurrency || 'USD') : '';
+                if (!w) return null;
+                return (
+                  <p data-unpriced-why="true" style={{ margin: '0 0 12px', fontSize: 13, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+                    <span role="status">{w} The score leaves out the positions without a value.</span>
+                    {onRetryPrices && (
+                      <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />
+                    )}
+                  </p>
+                );
+              })()}
               {scoreState === 'ok' && (() => {
                 const size = 180;
                 const strokeWidth = 14;
