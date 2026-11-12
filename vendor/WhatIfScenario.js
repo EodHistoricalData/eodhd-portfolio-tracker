@@ -147,7 +147,7 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
     const notBuyable = actionType !== 'sell' ? Calc.indexNotBuyable(sym) : null;
     if (notBuyable) return { note: notBuyable };
     // Bought, it is priced in its own currency: one nobody knows is said
-    // now, not guessed (1155.KLSE had none on 02.11).
+    // now, not guessed (1155.KLSE had none).
     if (actionType !== 'sell' && !res.held) {
       const ccy = (res.row && res.row.Currency) || symbolCurrency.current[sym] || Calc.currencyFromSymbol(sym);
       if (!ccy) return { note: sym + ': the currency it is quoted in is not known, so it cannot be priced in ' + base + '. Pick another listing.' };
