@@ -741,6 +741,28 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
       });
     }
 
+    let limitLine = null;
+    const W = window.FreeLimitWalls;
+    const newNames = new Set(pendingTx.filter(p => p.holding.pending).map(p => p.holding.key));
+    const heldNow = () => Storage.getHoldingsByPortfolio(portfolioId).length;
+    const walled = W && newNames.size ? W.portfolioConfirm([['positions', () => heldNow() + newNames.size]]) : null;
+    const refusal = walled ? await walled : null;
+    if (walled) {
+      pendingTx.forEach(p => {
+        if (!p.holding.pending || p.holding.created) return;
+        const held = Storage.holdingOf ? Storage.holdingOf(portfolioId, p.holding.symbol) : null;
+        if (held) p.holding.created = held;
+      });
+    }
+    const max = refusal && refusal.limit ? refusal.limit.max : null;
+    if (Number.isFinite(max)) {
+      const total = pendingTx.length;
+      const fit = W.rowsThatFit(pendingTx.map(p => ({ key: p.holding.key, adds: !!p.holding.pending && !p.holding.created, p })), Math.max(0, max - heldNow()));
+      pendingTx.splice(0, pendingTx.length, ...fit.kept.map(r => r.p));
+      fit.left.forEach(r => { skipped.push({ row: { symbol: r.p.holding.symbol, date: r.p.data.date }, reason: W.importRowReason(max) }); });
+      limitLine = W.importLine(pendingTx.length, total, max);
+    }
+
     // Write: the new holdings, then every transaction at once. A failure
     // removes the holdings this import made, so nothing half-done is left.
     const made = [];
@@ -777,7 +799,7 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
     // can say it rather than "Imported N" over rows that silently vanished;
     // the third, what was imported on an assumption (a transfer costed at the
     // day's close, a rate from another day).
-    onImport(imported, skipped.map(x => `${x.row.symbol} ${x.row.date}: ${x.reason}`), [...new Set(notes)]);
+    onImport(imported, skipped.map(x => `${x.row.symbol} ${x.row.date}: ${x.reason}`), [...new Set(notes)], ...(limitLine ? [limitLine] : []));
   };
 
   // Columns whose decimal separator nothing in the file settles, for the
@@ -1123,7 +1145,9 @@ window.ImportReportDialog = ({ report, onClose, theme }) => {
       color: isDark ? C3.textDark : C3.textLightTheme,
     }}>
       <h2 style={{ fontSize: 18, fontWeight: 700, margin: '0 0 8px' }}>Import finished</h2>
-      <p style={{ margin: 0 }}>Imported {count} transaction{count === 1 ? '' : 's'}.</p>
+      {report && report.limitLine
+        ? <p data-free-limit-line="positions" style={{ margin: 0 }}>{report.limitLine}</p>
+        : <p style={{ margin: 0 }}>Imported {count} transaction{count === 1 ? '' : 's'}.</p>}
       {skipped.length > 0 && (
         <div style={{ marginTop: 14 }}>
           <div style={{ fontWeight: 600 }}>Skipped {skipped.length}</div>

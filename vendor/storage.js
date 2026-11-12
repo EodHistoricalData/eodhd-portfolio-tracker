@@ -67,13 +67,17 @@ window.PortfolioStorage = {
   attempt(write, onError) {
     try { return write(); } catch (e) {
       if (e && e.name === 'PortfolioStorageError') {
-        if (typeof onError === 'function') onError(e.message);
+        // The error rides along for a caller that shows a card.
+        if (typeof onError === 'function') onError(e.message, e);
         else console.warn('[PortfolioStorage]', e.message);
         return null;
       }
       throw e;
     }
   },
+
+  // Nothing is refused here in a standalone app (shell/shims.js).
+  _freeLimit() {},
   // Storage keys
   KEYS: {
     PORTFOLIOS: 'eodhd_pt_portfolios',
@@ -132,9 +136,28 @@ window.PortfolioStorage = {
     };
 
     const portfolios = this.getPortfolios();
+    this._freeLimit('portfolios', () => portfolios.length + 1);
     portfolios.push(portfolio);
     // A full storage is said, not passed off as saved.
     if (!this.savePortfolios(portfolios)) throw new PortfolioStorageError('full', STORAGE_FULL_MESSAGE);
+    return portfolio;
+  },
+
+  /**
+   * A new portfolio with its positions, all of them or none: a template, a
+   * fund, an AI-built portfolio, an index. Throws what the failed write threw.
+   */
+  createPortfolioWithHoldings(data, holdings) {
+    const list = Array.isArray(holdings) ? holdings : [];
+    this._freeLimit('portfolios', () => this.getPortfolios().length + 1);
+    this._freeLimit('positions', () => list.length);
+    const portfolio = this.createPortfolio(data);
+    try {
+      list.forEach(h => { this.createHolding({ ...h, portfolioId: portfolio.id }); });
+    } catch (e) {
+      try { this.deletePortfolio(portfolio.id); } catch (_) { /* nothing more to undo */ }
+      throw e;
+    }
     return portfolio;
   },
 
@@ -218,12 +241,32 @@ window.PortfolioStorage = {
     return this.getHoldings().filter(h => h.portfolioId === portfolioId);
   },
 
+  // One listing however it was written: a legacy "AAPL" is AAPL.US and case
+  // does not count -- the importer's reading (Calc.importSymbolGuess). Null
+  // for no symbol (a manual asset).
+  listingKey(symbol) {
+    if (typeof symbol !== 'string' || !symbol.trim()) return null;
+    const Calc = window.PortfolioCalculations;
+    const guess = Calc && typeof Calc.importSymbolGuess === 'function' ? Calc.importSymbolGuess(symbol) : null;
+    return (guess || symbol.trim()).toUpperCase();
+  },
+
+  // The portfolio's holding of `symbol`'s listing, or null.
+  holdingOf(portfolioId, symbol) {
+    const key = this.listingKey(symbol);
+    if (!key) return null;
+    return this.getHoldingsByPortfolio(portfolioId).find(h => this.listingKey(h.symbol) === key) || null;
+  },
+
   createHolding(data) {
     // Only into a portfolio that exists now, in storage -- not in this tab's
     // memory of it.
     if (!data.portfolioId || !this.getPortfolios().some(p => p.id === data.portfolioId)) {
       throw new PortfolioStorageError('portfolio-gone', 'This portfolio was deleted (perhaps in another tab). Reload the page and pick a portfolio.');
     }
+    // A name the portfolio already holds is not a new position.
+    this._freeLimit('positions', () => (this.holdingOf(data.portfolioId, data.symbol)
+      ? 0 : this.getHoldingsByPortfolio(data.portfolioId).length + 1));
     const holding = {
       id: this.generateId(),
       portfolioId: data.portfolioId,

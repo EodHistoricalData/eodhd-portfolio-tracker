@@ -53,6 +53,8 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
       searchTimeout.current = setTimeout(async () => {
         let data = null;
         let failed = null;
+        let limited = false;
+        let thrown;
         const SC = window.SymbolCode;
         try {
           // The code alone for Yahoo's suffix: search/VOD.L answers nothing,
@@ -61,14 +63,20 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
         } catch (e) {
           // Said, and its empty list is no answer: Enter and "+ Add" ask the
           // search again.
-          failed = SC.searchFailNote ? SC.searchFailNote(e, SC.apiFor(window.EODHD_API, apiKey).limited()) : 'The ticker search did not load. Try again.';
+          const left = SC.apiFor(window.EODHD_API, apiKey).limited();
+          failed = SC.searchFailNote ? SC.searchFailNote(e, left) : 'The ticker search did not load. Try again.';
+          limited = Boolean(SC.searchLimited && SC.searchLimited(e, left));
+          thrown = e;
         }
         if (queryRef.current !== val) return;
         searchFailedForRef.current = failed ? val.toUpperCase() : null;
         setSearchResults(Array.isArray(data) ? data.slice(0, 5) : []);
         setShowSearch(true);
         setAnsweredFor(val.toUpperCase());
-        if (failed) setSymbolNote(failed);
+        // The limit under the field as in every picker: the wait counted
+        // down, and the search asked again by itself once it is over.
+        if (failed && limited && symbolKbRef.current && symbolKbRef.current.say) symbolKbRef.current.say(failed, { error: thrown });
+        else if (failed) setSymbolNote(failed);
       }, 300);
     } else {
       setSearchResults([]);
@@ -130,7 +138,9 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
   const readTyped = async (typed, rows) => {
     const SC = window.SymbolCode;
     const res = await SC.resolve(typed, Object.assign(SC.apiFor(window.EODHD_API, apiKey), { rows, held: heldSymbols }));
-    if (!res.symbol) return { note: res.note };
+    // `limited`: the limit stopped the check (said with the wait counting
+    // down, as the search's own failure is).
+    if (!res.symbol) return res.reason === 'limited' ? { note: res.note, limited: true } : { note: res.note };
     // A holding is named by its stored key: an old "BRK.B" is sold as BRK.B.
     const sym = res.held ? res.symbol : Calc.whatIfSymbol(res.symbol, heldSymbols);
     const notBuyable = actionType !== 'sell' ? Calc.indexNotBuyable(sym) : null;
@@ -156,9 +166,11 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
     resolve: async (q, rows) => {
       const got = await readTyped(q, searchFailedForRef.current === q ? undefined : rows);
       if (symbolNowRef.current !== q) return null;
+      if (got.note && got.limited) return { note: got.note, limited: true };
       if (got.note) { setSymbolNote(got.note); return null; }
       return { item: got.row };
     },
+    search: (q) => handleSymbolChange(q),
   });
   symbolKbRef.current = symbolKb;
   const [swapFrom, setSwapFrom] = React.useState('');
@@ -169,6 +181,7 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
 
   // "+ Add to Scenario" is checking the typed text (a search or a quote).
   const [adding, setAdding] = React.useState(false);
+  const addScenarioRef = React.useRef(null);
   const addScenario = async () => {
     if (!symbol || !dollarAmount || amountCheck.error || adding) return;
     const amount = amountCheck.value;
@@ -199,7 +212,9 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
     // stands.
     if (symbolNowRef.current !== typed || gen !== pickGenRef.current) return;
     if (!got.symbol) {
-      setSymbolNote(got.note);
+      // Add, which the limit stopped, is done again once the wait is over.
+      if (got.limited && symbolKbRef.current && symbolKbRef.current.say) symbolKbRef.current.say(got.note, { limited: true, redo: () => addScenarioRef.current() });
+      else setSymbolNote(got.note);
       focusNext(() => wifSearchRef.current);
       return;
     }
@@ -222,6 +237,7 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
     // to <body>: on to the symbol field, for the next.
     focusNext(() => wifSearchRef.current);
   };
+  addScenarioRef.current = addScenario;
 
   // The row's ✕ goes with the row: the focus moves to the next row's ✕, the
   // one before when it was the last, or the symbol field when none is left
@@ -243,14 +259,25 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
   // Simulate scenarios. The arithmetic is Calc.whatIfSimulate (tested); this only prices what isn't held yet,
   // converted into the portfolio currency.
   const simulateRef = React.useRef(null);
-  const simulate = async () => {
+  // Each run is numbered; a verdict belongs to the run it was asked for.
+  const runRef = React.useRef(0);
+  const resultRef = React.useRef(null);
+  resultRef.current = result;
+  // `auto`: the run made again by itself after the limit's wait (below).
+  const simulate = async (opts) => {
     if (scenarios.length === 0) return;
+    const auto = Boolean(opts && opts.auto);
+    const run = ++runRef.current;
     setLoading(true);
     setAiVerdict(null);
 
     try {
       const held = new Set(heldSymbols);
       const quotes = {};
+      // A price or a rate the limit held back: the run is made again by
+      // itself once the wait is over (useReloadAfterWait below).
+      let atLimit = false;
+      const seen = (f) => { if (f && f.limited) atLimit = true; return f; };
       for (const sc of scenarios) {
         if (sc.type === 'sell' || held.has(sc.symbol) || quotes[sc.symbol]) continue;
         // Typed by hand rather than picked from search: one lookup for its
@@ -282,7 +309,7 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
             // At the limit the last price seen stays usable, as before.
             const last = e && e.rateLimited && window.EODHD_API.lastQuote ? window.EODHD_API.lastQuote(sc.symbol) : null;
             if (!last) {
-              const f = RLW.outage(e || {});
+              const f = seen(RLW.outage(e || {}));
               quotes[sc.symbol] = { error: f ? failedLine(f) : 'Could not fetch price' };
               continue;
             }
@@ -291,15 +318,15 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
           const px = Calc.toRate(quote?.close) ?? Calc.toRate(quote?.previousClose);
           const ccy = symbolCurrency.current[sc.symbol] || Calc.currencyFromSymbol(sc.symbol);
           // No quote at the limit is said so, not "Could not fetch price".
-          if (px == null) { quotes[sc.symbol] = { error: quote == null && RLW.failure(null).limited ? failedLine(RLW.failure(null)) : 'Could not fetch price' }; continue; }
+          if (px == null) { quotes[sc.symbol] = { error: quote == null && seen(RLW.failure(null)).limited ? failedLine(RLW.failure(null)) : 'Could not fetch price' }; continue; }
           if (!ccy) { quotes[sc.symbol] = { error: 'Unknown quote currency — pick the symbol from search' }; continue; }
           const fxFails = [];
           const fx = await Calc.fxRate(apiKey, ccy, base, fxFails);
-          const fxFailed = fx ? null : Calc.fxFailure(fxFails);
+          const fxFailed = fx ? null : seen(Calc.fxFailure(fxFails));
           quotes[sc.symbol] = fx ? { price: px * fx, currency: ccy }
             : { error: fxFailed ? `The ${ccy}/${base} rate did not load: ${RLW.failReason(fxFailed)} Simulate again.` : `No ${ccy}/${base} rate` };
         } catch (e) {
-          const f = RLW.outage(e || {});
+          const f = seen(RLW.outage(e || {}));
           quotes[sc.symbol] = { error: f ? failedLine(f) : 'Could not fetch price' };
         }
       }
@@ -314,16 +341,41 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
           : c.type === 'sell' ? `Sell ${Calc.quantityText(c.shares, c.symbol)} ${c.symbol} at ${fmtBase(c.price)}${capNote(c)}`
           : `Swap ${Calc.quantityText(c.soldShares, c.from)} ${c.from} → ${Calc.quantityText(c.shares, c.symbol)} ${c.symbol} (${fmtBase(c.value)})${capNote(c)}`,
       });
+      // A new failure for each such run: its reload is paced from it. One
+      // run again by itself per press: a run made again that meets the limit
+      // once more waits for Simulate.
+      r.run = run;
+      r.limited = atLimit ? window.RateLimitWait.failure({ rateLimited: true }) : null;
+      r.again = atLimit && !auto;
       setResult(r);
     } catch (e) {
       console.error('Simulation error:', e);
     }
     setLoading(false);
   };
+  // Simulate costs nothing -- no token and no quota: the prices and rates
+  // come through the data proxy, and only Get AI Verdict is charged. A run
+  // the limit left a price or a rate out of is made again by itself once the
+  // wait is over, as every screen loads again: Before and After stayed equal
+  // after the wait. Not once an AI verdict was asked for that run: running
+  // again would drop the verdict that was paid for.
+  const rerunDue = Boolean(result && result.limited && result.again);
+  window.RateLimitWait.useReloadAfterWait(rerunDue && !aiVerdict && !aiLoading && !loading ? result.limited : null, () => {
+    // Disabled while it runs, as after a press: the focus comes back to it.
+    if (document.activeElement === simulateRef.current) focusNext(() => simulateRef.current);
+    simulate({ auto: true });
+  }, 'whatif-simulate');
+  // No verdict while a run is out or about to be made again: it was sent
+  // for the run on screen while the run again was coming, and the paid
+  // answer stood beside the new run it had not seen.
+  const verdictHeld = loading || rerunDue;
 
   // AI Verdict
   const getAIVerdict = async () => {
-    if (!result || !window.AIService) return;
+    if (!result || !window.AIService || verdictHeld || aiLoading) return;
+    const run = result.run;
+    // Shown only beside the run it describes.
+    const forThisRun = () => Boolean(resultRef.current && resultRef.current.run === run);
     setAiLoading(true);
     try {
       // Rounded, in the portfolio's currency: the allocation went in as raw
@@ -359,9 +411,9 @@ Diversification score: ${Math.round(result.diversificationScore)}/100 (effective
         { role: 'user', content: context },
       ];
       const verdict = await window.AIService.chatWithTokens('whatif_scenario', messages);
-      setAiVerdict(verdict);
+      if (forThisRun()) setAiVerdict(verdict);
     } catch (e) {
-      if (e.message !== 'AI_TOKENS_REQUIRED') setAiVerdict('Failed to get AI verdict.');
+      if (e.message !== 'AI_TOKENS_REQUIRED' && forThisRun()) setAiVerdict('Failed to get AI verdict.');
     }
     setAiLoading(false);
   };
@@ -558,12 +610,13 @@ Diversification score: ${Math.round(result.diversificationScore)}/100 (effective
             // it comes back to the button once it is enabled.
             if (document.activeElement === e.currentTarget) focusNext(() => simulateRef.current);
             simulate();
-          }} disabled={loading} style={{
+            // Not while a verdict is written: it would describe the run replaced.
+          }} disabled={loading || aiLoading} style={{
             width: '100%', padding: '12px', borderRadius: 12, border: 'none', marginTop: 12,
             // Flat accent with white text (4.6:1).
             background: C3.logoGradient, color: 'white',
             fontSize: 14, fontWeight: 600, cursor: 'pointer',
-            opacity: loading ? 0.6 : 1,
+            opacity: loading || aiLoading ? 0.6 : 1,
           }}>
             {loading ? 'Simulating...' : 'Simulate Scenario'}
           </button>
@@ -673,15 +726,21 @@ Diversification score: ${Math.round(result.diversificationScore)}/100 (effective
                 icon="zap"
                 onClick={getAIVerdict}
                 loading={aiLoading}
+                disabled={verdictHeld}
               />
             ) : (
-              <button onClick={getAIVerdict} disabled={aiLoading} style={{
+              <button onClick={getAIVerdict} disabled={aiLoading || verdictHeld} style={{
                 width: '100%', padding: '12px', borderRadius: 12, border: 'none',
                 background: C3.logoGradient, color: 'white', fontSize: 14, fontWeight: 600, cursor: 'pointer',
-                opacity: aiLoading ? 0.6 : 1,
+                opacity: aiLoading || verdictHeld ? 0.6 : 1,
               }}>
                 {aiLoading ? 'Analyzing...' : (verdictCost ? `Get AI Verdict (${verdictCost})` : 'Get AI Verdict')}
               </button>
+            )}
+            {!aiVerdict && rerunDue && !loading && (
+              <div data-wif-verdict-wait="" style={{ marginTop: 8, fontSize: 12, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+                The verdict is available once the scenario is simulated again after the wait.
+              </div>
             )}
           </div>
           )}

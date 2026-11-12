@@ -16,6 +16,7 @@ window.RebalancingAdvisor = ({ holdings, holdingsData, theme, onClose, onRetryPr
   const [result, setResult] = React.useState(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState(null);
+  const adviceGate = (window.FreeLimitWalls ? window.FreeLimitWalls.useAnalyticsGate : () => 'open')('rebalance', true);
 
   const Icon = ({ name, size = 24, color }) => {
     return React.createElement('svg', {
@@ -57,6 +58,7 @@ window.RebalancingAdvisor = ({ holdings, holdingsData, theme, onClose, onRetryPr
   };
 
   const handleAnalyze = async () => {
+    if (adviceGate !== 'open') return;
     setLoading(true);
     setError(null);
     setResult(null);
@@ -349,10 +351,13 @@ window.RebalancingAdvisor = ({ holdings, holdingsData, theme, onClose, onRetryPr
             icon="scale"
             onClick={handleAnalyze}
             loading={loading}
+            disabled={adviceGate !== 'open' || undefined}
             isDark={isDark}
             style={{ width: '100%', justifyContent: 'center', padding: '14px 20px', fontSize: 15 }}
           />
         </div>
+        {adviceGate === 'wall' && window.FreeLimitWalls && window.PlanNotice && window.PlanNotice.RefusalCard
+          && React.createElement(window.PlanNotice.RefusalCard, { refusal: window.FreeLimitWalls.analyticsRefusal('rebalance'), isDark })}
 
         {/* Error */}
         {error && (

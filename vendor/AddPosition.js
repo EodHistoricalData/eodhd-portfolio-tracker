@@ -236,6 +236,7 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
     // A search that failed is said as such, never "No results found" -- a
     // 500 or a 429 read as an empty answer.
     let failed = null;
+    let thrown;
     const SC = window.SymbolCode;
     try {
       // The code alone for Yahoo's suffix: search/VOD.L answers nothing,
@@ -252,7 +253,8 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
       });
       shown = filtered.slice(0, 15);
     } catch (e) {
-      console.error('Search error:', e);
+      if (!(e && e.rateLimited)) console.error('Search error:', e);
+      thrown = e;
       failed = SC && SC.searchFailNote ? SC.searchFailNote(e, SC.apiFor(window.EODHD_API, apiKey).limited()) : 'The ticker search did not load. Try again.';
     }
     if (seq !== searchSeqRef.current) return;
@@ -260,7 +262,9 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
     setSearchResults(shown);
     setAnsweredFor(asked);
     setSearching(false);
-    if (failed && resultsKbRef.current && resultsKbRef.current.say) resultsKbRef.current.say(failed);
+    // At the limit the line counts the wait down and the search is asked
+    // again by itself once it is over (useComboboxKeys `search`).
+    if (failed && resultsKbRef.current && resultsKbRef.current.say) resultsKbRef.current.say(failed, { error: thrown });
   };
 
   React.useEffect(() => {
@@ -469,7 +473,7 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
       ? { ...res.row, Name: res.row.Code, Currency: listingCurrencyOf(res.row) }
       : res.row),
   }) : undefined;
-  const resultsKb = useComboboxKeys({ items: searchResults, open: matchesShown, onPick: handleSelectAsset, listId: 'pt-addpos-results', query: searchQuery, codeOf: (r) => r.Code, isDark, answered: answeredFor, resolve: resolveTyped });
+  const resultsKb = useComboboxKeys({ items: searchResults, open: matchesShown, onPick: handleSelectAsset, listId: 'pt-addpos-results', query: searchQuery, codeOf: (r) => r.Code, isDark, answered: answeredFor, resolve: resolveTyped, search: () => handleSearch() });
   resultsKbRef.current = resultsKb;
 
   // Said under the field, not with the browser's alert().
@@ -574,6 +578,7 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
   // A save that did not reach the account: said in the form, which stays
   // open.
   const [syncError, setSyncError] = React.useState(null);
+  const [limitCard, setLimitCard] = ((window.FreeLimitWalls && window.FreeLimitWalls.useLimitCard) || (() => React.useState(null)))();
 
   const handleSave = async () => {
     // Idempotency guard: a double tap on mobile/TG can fire onClick twice
@@ -585,6 +590,7 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
     savingRef.current = true;
     setSaving(true);
     setSyncError(null);
+    if (limitCard) setLimitCard(null);
     try {
       const fullSymbol = selectedAsset.isManual ? null : `${selectedAsset.Code}.${selectedAsset.Exchange}`;
       const quantity = num(txQuantity);
@@ -597,13 +603,19 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
       // already looked the holding up first; the form now does the same.
       // A manual asset has no symbol, so it is matched by name -- otherwise a
       // second entry for "My flat" would be a second flat, and its sale would
-      // find nothing to sell.
-      const inPortfolio = Storage.getHoldingsByPortfolio(portfolioId);
+      // find nothing to sell. A symbol is one listing however it was stored:
+      // a legacy "AAPL" or "aapl.us" is AAPL.US (Storage.holdingOf, the
+      // importer's reading); an exact match was a second AAPL row.
       const wantedName = String(selectedAsset.Name || '').trim().toLowerCase();
-      let holding = fullSymbol
-        ? inPortfolio.find(h => h.symbol === fullSymbol)
-        : inPortfolio.find(h => h.type === 'manual' && !h.symbol && wantedName
+      const findHeld = () => {
+        const inPortfolio = Storage.getHoldingsByPortfolio(portfolioId);
+        if (!fullSymbol) {
+          return inPortfolio.find(h => h.type === 'manual' && !h.symbol && wantedName
             && String(h.name || '').trim().toLowerCase() === wantedName);
+        }
+        return Storage.holdingOf ? Storage.holdingOf(portfolioId, fullSymbol) : inPortfolio.find(h => h.symbol === fullSymbol);
+      };
+      let holding = findHeld();
 
       // The rules every way in shares (Calc.validateTransaction): a sale
       // checked against the whole history -- a backdated one used to pass on
@@ -630,6 +642,18 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
       const savedType = prefillAsks && prefillChosenType ? prefillChosenType : holdingTypeOf(selectedAsset);
       const savedName = shownAsset.Name;
 
+      if (!holding) {
+        const W = window.FreeLimitWalls;
+        const walled = W ? W.portfolioConfirm([['positions', () => Storage.getHoldingsByPortfolio(portfolioId).length + 1]]) : null;
+        const refusal = walled ? await walled : null;
+        if (walled) holding = findHeld();
+        if (!holding && refusal) {
+          setLimitCard(refusal);
+          savingRef.current = false;
+          setSaving(false);
+          return;
+        }
+      }
       const created = !holding;
       if (!holding) {
         holding = Storage.createHolding({
@@ -690,7 +714,11 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
       setSaving(false);
       // A refusal from storage (full, portfolio deleted in another tab) is
       // said, not swallowed: the form used to close as if saved.
-      if (e && e.name === 'PortfolioStorageError') { setSyncError(e.message); return; }
+      if (e && e.name === 'PortfolioStorageError') {
+        if (e.code === 'free-limit' && e.refusal) setLimitCard(e.refusal);
+        else setSyncError(e.message);
+        return;
+      }
       throw e;
     }
   };
@@ -968,6 +996,8 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
             {syncError && (
               <div role="alert" data-sync-error style={{ fontSize: 13, lineHeight: 1.5, color: isDark ? C3.error : (C3.errorLight || '#c81e2c') }}>{syncError}</div>
             )}
+            {limitCard && window.PlanNotice && window.PlanNotice.RefusalCard
+              && React.createElement(window.PlanNotice.RefusalCard, { refusal: limitCard, isDark })}
             <button
               onClick={handleSave}
               disabled={cannotSave}

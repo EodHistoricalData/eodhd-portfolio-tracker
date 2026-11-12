@@ -67,6 +67,22 @@ window.PortfolioFundamentals = (() => {
     store.set(k, { promise: p, startedAt: now() });
     return p;
   }
+  function dropFreeLimited(lifted) {
+    const API = window.EODHD_API;
+    if (!Array.isArray(lifted) || !lifted.length || !API || typeof API.freeLimitedOf !== 'function') return 0;
+    let dropped = 0;
+    Array.from(store.keys()).forEach((k) => {
+      const e = store.get(k);
+      const ids = e && !e.promise ? API.freeLimitedOf(e.value) : null;
+      if (ids && ids.some((id) => lifted.indexOf(id) !== -1)) { store.delete(k); dropped++; }
+    });
+    return dropped;
+  }
+  try {
+    window.addEventListener('limits:changed', (ev) => {
+      try { dropFreeLimited(ev && ev.detail && ev.detail.lifted); } catch (_) { /* never */ }
+    });
+  } catch (_) { /* no window events: nothing to listen to */ }
   // { [symbol]: fundamentals | null } for every symbol; `_failed` (not
   // enumerable): what the first request that failed was, or undefined.
   async function many(apiKey, symbols) {
@@ -82,7 +98,7 @@ window.PortfolioFundamentals = (() => {
   }
   // What the last request for a symbol threw when it did not come back.
   const failureOf = (apiKey, symbol) => fails.get(keyOf(apiKey, symbol)) || null;
-  return { get, many, failureOf, TTL, JOIN_MS, CAP, clear: () => store.clear() };
+  return { get, many, failureOf, dropFreeLimited, TTL, JOIN_MS, CAP, clear: () => store.clear() };
 })();
 // The quote currency of a backtest's instrument: the held position's, else
 // the search's row for that listing, else the one its exchange usually
@@ -149,6 +165,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
   const [sectorsLoading, setSectorsLoading] = React.useState(false);
   const [correlationMatrix, setCorrelationMatrix] = React.useState(null);
   const [monteCarloData, setMonteCarloData] = React.useState(null);
+  const monteCarloGate = (window.FreeLimitWalls ? window.FreeLimitWalls.useAnalyticsGate : () => 'open')('montecarlo', activeTab === 'montecarlo');
   const [backtestResult, setBacktestResult] = React.useState(null);
   const [backtestSymbol, setBacktestSymbol] = React.useState('');
   const [backtestAmount, setBacktestAmount] = React.useState('10000');
@@ -233,7 +250,9 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
   // Look the sector up from fundamentals (General.Sector) for every stock
   // holding still without one, here, and store it on the holding.
   const sectorKey = holdings.map(h => h.id + ':' + (h.sector || '')).join(',');
+  const sectorsDeferred = activeTab === 'montecarlo' && monteCarloGate !== 'open';
   React.useEffect(() => {
+    if (sectorsDeferred) return;
     if (!apiKey || !window.EODHD_API || !window.EODHD_API.getFundamentals) return;
     const missing = holdings.filter(h => h && h.symbol && !h.sector && !learnedSectors[h.id]
       && (h.type || 'stock') === 'stock'
@@ -259,7 +278,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
     })();
     return () => { cancelled = true; setSectorsLoading(false); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiKey, sectorKey]);
+  }, [apiKey, sectorKey, sectorsDeferred]);
   // Shares are held and no price came back for them. `holdings` are the
   // stored records and carry no quantity -- it is worked out from the
   // transactions and arrives in holdingsData -- so asking them never said
@@ -339,9 +358,9 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
     else if (activeTab === 'benchmark') loadBenchmarkComparison();
     else if (activeTab === 'risk') loadRiskMetrics();
     else if (activeTab === 'correlation') loadCorrelationMatrix();
-    else if (activeTab === 'montecarlo') loadMonteCarlo();
+    else if (activeTab === 'montecarlo' && monteCarloGate === 'open') loadMonteCarlo();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, portfolioId, pricesLoading, dataKey]);
+  }, [activeTab, portfolioId, pricesLoading, dataKey, monteCarloGate]);
 
   const loadPerformanceHistory = async () => {
     setLoading(true);
@@ -2155,7 +2174,9 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
         {activeTab === 'montecarlo' && (
           <div>
             <h3 style={{ fontWeight: 600, marginBottom: 16, marginTop: 0 }}>Monte Carlo Simulation</h3>
-            {loading ? (
+            {monteCarloGate === 'wall' && window.FreeLimitWalls && window.PlanNotice && window.PlanNotice.RefusalCard ? (
+              React.createElement(window.PlanNotice.RefusalCard, { refusal: window.FreeLimitWalls.analyticsRefusal('montecarlo'), isDark })
+            ) : loading || monteCarloGate !== 'open' ? (
               <div style={{ textAlign: 'center', padding: 32 }}><div style={{ width: 24, height: 24, border: '3px solid rgba(255,255,255,0.1)', borderTopColor: C3.glowOrange, borderRadius: '50%', animation: 'spin .8s linear infinite', margin: '0 auto' }} /></div>
             ) : monteCarloData?.failed ? (
               <RLW.FailNote panel="montecarlo" text={monteCarloData.error} failure={monteCarloData.failed} onRetry={loadMonteCarlo} isDark={isDark}

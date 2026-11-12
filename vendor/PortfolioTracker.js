@@ -81,6 +81,9 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   const [showAddPortfolio, setShowAddPortfolio] = React.useState(false);
   // A name over the limit is said, not cut.
   const [newPortfolioNote, setNewPortfolioNote] = React.useState('');
+  const [newPortfolioWall, setNewPortfolioWall] = ((window.FreeLimitWalls && window.FreeLimitWalls.useLimitCard) || (() => React.useState(null)))();
+  const positionsLimit = (window.FreeLimitWalls ? window.FreeLimitWalls.useItem : () => null)('positions');
+  React.useEffect(() => { if (!showAddPortfolio && newPortfolioWall) setNewPortfolioWall(null); }, [showAddPortfolio]);
 
   // While a dirty form is open in TG, enable the close-confirmation. Without
   // this the user swipes down on the Mini App, dismissing it, and silently
@@ -1235,6 +1238,9 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   const currencyPnL = Calc.getTotalCurrencyPnL(holdingsWithData);
   const currencyAllocation = Calc.getAllocationByCurrency(holdingsWithData);
 
+  const positionsCounterText = positionsLimit && activePortfolioId && activePortfolioId !== 'all' && window.FreeLimitWalls
+    ? window.FreeLimitWalls.positionsCounter(holdings.length, positionsLimit) : null;
+
   // A name over the limit is said, not cut: 300 characters were silently
   // trimmed to 60.
   const handleCreatePortfolio = (name, baseCurrency) => {
@@ -1244,11 +1250,18 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     const same = portfolioNamed(clean);
     if (same) { setNewPortfolioNote(`A portfolio called "${same.name}" already exists. Pick another name.`); return; }
     setNewPortfolioNote('');
-    const newPortfolio = Storage.attempt(() => Storage.createPortfolio({ name: clean, baseCurrency }), setNewPortfolioNote);
-    if (!newPortfolio) return;
-    loadData();
-    setActivePortfolioId(newPortfolio.id);
-    setShowAddPortfolio(false);
+    const create = () => {
+      const newPortfolio = Storage.attempt(() => Storage.createPortfolio({ name: clean, baseCurrency }),
+        (m, e) => (e && e.code === 'free-limit' && e.refusal ? setNewPortfolioWall(e.refusal) : setNewPortfolioNote(m)));
+      if (!newPortfolio) return;
+      loadData();
+      setActivePortfolioId(newPortfolio.id);
+      setShowAddPortfolio(false);
+    };
+    const W = window.FreeLimitWalls;
+    const walled = W ? W.portfolioConfirm([['portfolios', () => Storage.getPortfolios().length + 1]]) : null;
+    if (!walled) { create(); return; }
+    walled.then((refusal) => { if (refusal) setNewPortfolioWall(refusal); else create(); });
   };
 
   const handleDeletePortfolio = (id) => {
@@ -1332,7 +1345,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
 
   // After a CSV import: reload, and say what was left out and why (a row
   // with no FX rate, or a sale of more than was held) instead of a bare count.
-  const handleImported = (count, skipped, notes) => {
+  const handleImported = (count, skipped, notes, limitLine) => {
     setShowImportCSV(false);
     const ph = Storage.getHoldingsByPortfolio(activePortfolioId);
     setHoldings(ph);
@@ -1342,6 +1355,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
       count,
       skipped: Array.isArray(skipped) ? skipped : [],
       notes: Array.isArray(notes) ? notes : [],
+      ...(limitLine ? { limitLine } : {}),
     });
   };
 
@@ -1483,6 +1497,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
               <button onClick={() => setShowSettings(true)} title="Portfolio settings and backup" aria-label="Portfolio settings and backup" style={{ background: 'none', border: `1px solid ${bd}`, borderRadius: 4, color: tm, cursor: 'pointer', padding: '6px 8px', display: 'flex', alignItems: 'center', ...tap40 }}>
                 {React.createElement(Icon, { name: 'settings', size: 14, color: tm })}
               </button>
+              {positionsCounterText && <span data-free-limit-counter="positions" style={{ fontSize: 12, color: tm }}>{positionsCounterText}</span>}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 }}>
               <button onClick={() => setShowAddPosition(true)} style={{ background: C3.logoGradient, border: 'none', color: 'white', padding: '8px 16px', fontSize: 12, fontFamily: "'Sora', sans-serif", fontWeight: 600, borderRadius: 4, cursor: 'pointer' }}>+ Add Position</button>
@@ -2119,16 +2134,14 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                 onAdopt: (t) => {
                   const tickers = t.tickers || [];
                   let refused = null;
-                  const portfolio = Storage.attempt(() => {
-                    const p = Storage.createPortfolio({ name: t.name, baseCurrency: 'USD', icon: 'barChart' });
-                    tickers.forEach((ticker, i) => {
-                      Storage.createHolding({ portfolioId: p.id, symbol: ticker, name: ticker.split('.')[0], type: (Calc.knownAssetType && Calc.knownAssetType(ticker)) || 'stock', notes: `Template: ${t.name}, target weight: ${t.weights?.[i] || 0}%` });
-                    });
-                    return p;
-                  }, (m) => { refused = m; });
+                  let refusal = null;
+                  // All of it or none: a refused write takes the new portfolio back.
+                  const portfolio = Storage.attempt(() => Storage.createPortfolioWithHoldings({ name: t.name, baseCurrency: 'USD', icon: 'barChart' },
+                    tickers.map((ticker, i) => ({ symbol: ticker, name: ticker.split('.')[0], type: (Calc.knownAssetType && Calc.knownAssetType(ticker)) || 'stock', notes: `Template: ${t.name}, target weight: ${t.weights?.[i] || 0}%` }))),
+                  (m, e) => { refused = m; if (e && e.code === 'free-limit') refusal = e.refusal || null; });
                   loadData();
                   // The catalog says it under its button.
-                  if (!portfolio) return { error: refused || 'The portfolio could not be saved.' };
+                  if (!portfolio) return refusal ? { error: refused, refusal } : { error: refused || 'The portfolio could not be saved.' };
                   // Names from the search, not the bare codes;
                   // the portfolio:names-filled listener above draws them.
                   if (window.PortfolioFillNames) window.PortfolioFillNames(portfolio.id, apiKey);
@@ -2191,6 +2204,8 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                     ariaLabel: 'Base currency',
                   })}
                 </div>
+                {newPortfolioWall && window.PlanNotice && window.PlanNotice.RefusalCard
+                  && React.createElement(window.PlanNotice.RefusalCard, { refusal: newPortfolioWall, isDark })}
                 <button type="submit" style={{ ...styles.button, ...styles.primaryButton, width: '100%', justifyContent: 'center', padding: '14px 24px', boxSizing: 'border-box' }}>
                   Create Portfolio
                 </button>
@@ -2323,6 +2338,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
           <div>
             <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Portfolio Tracker</h1>
             <p style={{ fontSize: 12, margin: 0, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>Track your investments</p>
+            {positionsCounterText && <p data-free-limit-counter="positions" style={{ fontSize: 12, margin: 0, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{positionsCounterText}</p>}
             {syncNote}
           </div>
         </div>
@@ -2845,6 +2861,8 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                   ariaLabel: 'Base currency',
                 })}
               </div>
+              {newPortfolioWall && window.PlanNotice && window.PlanNotice.RefusalCard
+                && React.createElement(window.PlanNotice.RefusalCard, { refusal: newPortfolioWall, isDark })}
               <button type="submit" style={{ ...styles.button, ...styles.primaryButton, width: '100%', justifyContent: 'center', padding: '14px 24px' }}>
                 Create Portfolio
               </button>

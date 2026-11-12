@@ -40,6 +40,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
   // dropped connection, an unreadable answer): said with its reason and a
   // Try again, not as "no insider transactions".
   const [insiderFail, setInsiderFail] = React.useState(null);
+  const [insiderRefusal, setInsiderRefusal] = React.useState(null);
   const [earningsFail, setEarningsFail] = React.useState(null);
   const [, sectorsArrived] = React.useState(0);
   React.useEffect(() => {
@@ -47,6 +48,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
     window.addEventListener('portfolio:sector-learned', on);
     return () => window.removeEventListener('portfolio:sector-learned', on);
   }, []);
+  const healthGate = (window.FreeLimitWalls ? window.FreeLimitWalls.useAnalyticsGate : () => 'open')('health', true);
 
   const Storage = window.PortfolioStorage;
   const Calc = window.PortfolioCalculations;
@@ -158,7 +160,20 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
   }, [activeTab]);
 
   const loadInsiderActivity = async () => {
+    const FLW = window.FreeLimitWalls;
+    const FL = window.FreeLimits;
     setLoading(true);
+    let wall = FLW && FLW.finSectionsWall ? FLW.finSectionsWall('healthInsiders') : null;
+    if (wall && FL && typeof FL.confirmWall === 'function') {
+      wall = (await FL.confirmWall('fin_sections')) ? FLW.finSectionsWall('healthInsiders') : null;
+    }
+    setInsiderRefusal(wall);
+    if (wall) {
+      setInsiderData([]);
+      setInsiderFail(null);
+      setLoading(false);
+      return;
+    }
     const allInsider = [];
     const insiderFails = [];
 
@@ -186,6 +201,13 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
             });
           });
         } catch (e) {
+          if (FLW && FLW.finFeedRefused && FLW.finFeedRefused(e)) {
+            setInsiderRefusal(FLW.finSectionsRefusal('healthInsiders', e.planRequired));
+            setInsiderData([]);
+            setInsiderFail(null);
+            setLoading(false);
+            return;
+          }
           insiderFails.push(e || {});
         }
       }
@@ -357,13 +379,9 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
   };
 
   const isWeb = window.APP_PLATFORM === 'WEB';
-  return (
-    <div style={styles.container}>
-      {/* Glow Effects — Telegram only; on web they show as a stray orange smudge in the top-right */}
-
-      {/* Header: hidden when embedded (the widget on the portfolio's main page),
-          which has its own heading, and where our Back button would do nothing. */}
-      {!embedded && (
+  // Header: hidden when embedded (the widget on the portfolio's main page),
+  // which has its own heading, and where our Back button would do nothing.
+  const header = !embedded && (
         <div style={styles.header}>
           <div style={styles.headerContent}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -377,7 +395,28 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
             </div>
           </div>
         </div>
-      )}
+      );
+
+  if (healthGate !== 'open') {
+    const W = window.FreeLimitWalls;
+    const refusal = healthGate === 'wall' && W ? W.analyticsRefusal('health') : null;
+    return (
+      <div style={styles.container} data-free-limit-wall="health">
+        {header}
+        <div style={{ padding: 16 }}>
+          {refusal && window.PlanNotice && window.PlanNotice.RefusalCard
+            ? React.createElement(window.PlanNotice.RefusalCard, { refusal, isDark })
+            : <p role="status" style={{ ...styles.muted, margin: 0 }}>Loading…</p>}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.container}>
+      {/* Glow Effects — Telegram only; on web they show as a stray orange smudge in the top-right */}
+
+      {header}
 
       {/* Tabs. Embedded (the Health Score widget) keeps the score in view:
           Insider and Earnings open in their own card under it instead of
@@ -613,7 +652,9 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
         {activeTab === 'insider' && (
           <div style={styles.card}>
             <h3 style={{ fontWeight: 600, marginBottom: 12, marginTop: 0, color: isDark ? C3.textDark : C3.textLightTheme }}>Recent Insider Transactions</h3>
-            {!loading && insiderFail && React.createElement(window.RateLimitWait.FailNote, {
+            {!loading && insiderRefusal && window.PlanNotice && window.PlanNotice.RefusalCard
+              && React.createElement(window.PlanNotice.RefusalCard, { refusal: insiderRefusal, isDark })}
+            {!loading && !insiderRefusal && insiderFail && React.createElement(window.RateLimitWait.FailNote, {
               what: insiderData.length ? 'The insider feed for some holdings' : 'The insider feed',
               failure: insiderFail, onRetry: loadInsiderActivity, isDark, panel: 'health-insider',
               style: { marginBottom: 12 },
@@ -667,7 +708,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
                   );
                 })}
               </div>
-            ) : insiderFail ? null : (
+            ) : insiderFail || insiderRefusal ? null : (
               <div style={{ textAlign: 'center', padding: '32px 0' }}>
                 <Icon name="briefcase" size={48} color={isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.2)'} />
                 <p style={{ color: isDark ? C3.textMutedDark : C3.textMutedLight, marginTop: 12 }}>No recent insider transactions</p>

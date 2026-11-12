@@ -31,7 +31,7 @@ window.PORTFOLIO_TEMPLATES = [
   //
   // Ten claimed to be somebody's actual positions. Only a 13F filing
   // establishes that, and EODHD does not carry 13F - it is listed as a gap in
-  // docs/reports/2026-02-25-eodhd-comprehensive-breakdown.md. Unsourced, and
+  // the terminal's own notes. Unsourced, and
   // unsourceable with the data we sell, so they are gone.
   //
   // Two were really funds. They moved to FUND REPLICAS below, under the fund's

@@ -141,13 +141,14 @@ window.OnboardingFlow = ({ onComplete, theme }) => {
     { code: 'CHF', name: 'Swiss Franc', symbol: 'Fr', flag: '🇨🇭' }
   ];
 
-  const handleComplete = () => {
-    // Create initial portfolio
-    const portfolio = Storage.attempt(() => Storage.createPortfolio({
-      name: String(portfolioName || 'My Portfolio').slice(0, Storage.NAME_MAX),
-      baseCurrency: selectedCurrency,
-      icon: 'barChart'
-    }), setSaveNote);
+  // Create initial portfolio
+  const createInitial = () => Storage.attempt(() => Storage.createPortfolio({
+    name: String(portfolioName || 'My Portfolio').slice(0, Storage.NAME_MAX),
+    baseCurrency: selectedCurrency,
+    icon: 'barChart'
+  }), setSaveNote);
+
+  const finish = (portfolio) => {
     if (!portfolio) return;
 
     // Save settings
@@ -159,6 +160,20 @@ window.OnboardingFlow = ({ onComplete, theme }) => {
     localStorage.setItem('eodhd_pt_onboarding_complete', 'true');
 
     onComplete(portfolio);
+  };
+
+  const confirming = React.useRef(false);
+  const handleComplete = () => {
+    const FL = window.FreeLimits;
+    const have = FL && typeof FL.item === 'function' && FL.item('portfolios') ? Storage.getPortfolios() : [];
+    if (!(have.length > 0 && FL.check('portfolios', have.length + 1) === 'wall')) { finish(createInitial()); return; }
+    if (confirming.current) return;
+    confirming.current = true;
+    FL.confirmWall('portfolios', () => Storage.getPortfolios().length + 1).then((wall) => {
+      confirming.current = false;
+      const now = Storage.getPortfolios();
+      finish(wall && now.length ? now[0] : createInitial());
+    });
   };
 
   return (

@@ -320,25 +320,40 @@ window.PortfolioCatalogView = ({ apiKey, theme, onAdopt, onClose, onOpenPortfoli
   // A refused save (full storage) is said under the button that asked,
   // keyed like the question; it was the browser's alert().
   const [adoptError, setAdoptError] = React.useState(null);
+  const [adoptWall, setAdoptWall] = ((window.FreeLimitWalls && window.FreeLimitWalls.useLimitCard) || (() => React.useState(null)))();
   const doAdopt = (key, t) => {
     setAdoptAsk(null);
     setAdoptError(null);
+    if (adoptWall) setAdoptWall(null);
     if (adopted[key]) return;
+    const W = window.FreeLimitWalls;
+    const S = window.PortfolioStorage;
+    const names = (t.tickers || []).length;
+    const walled = W && S ? W.portfolioConfirm([['portfolios', () => S.getPortfolios().length + 1], ['positions', () => names]]) : null;
+    if (!walled) { adoptNow(key, t); return; }
+    walled.then((refusal) => {
+      if (!refusal) { adoptNow(key, t); return; }
+      setAdoptWall(Object.assign({}, refusal, { adoptKey: key }));
+      focusNext(() => document.querySelector('[data-adopt-for="' + String(key).replace(/"/g, '') + '"]'));
+    });
+  };
+  const adoptNow = (key, t) => {
     let id = null;
     let refused = null;
     if (onAdopt) {
       const r = onAdopt(t);
-      if (r && typeof r === 'object') refused = r.error || 'The portfolio could not be saved.';
-      else id = r;
+      if (r && typeof r === 'object') {
+        refused = r.error || 'The portfolio could not be saved.';
+        if (r.refusal) { setAdoptWall(Object.assign({}, r.refusal, { adoptKey: key })); return; }
+      } else id = r;
     } else {
       const Storage = window.PortfolioStorage;
-      const portfolio = Storage && Storage.attempt(() => {
-        const p = Storage.createPortfolio({ name: t.name, baseCurrency: 'USD', icon: 'barChart' });
-        (t.tickers || []).forEach((ticker, i) => {
-          Storage.createHolding({ portfolioId: p.id, symbol: ticker, name: ticker.split('.')[0], type: (window.PortfolioCalculations && window.PortfolioCalculations.knownAssetType(ticker)) || 'stock', notes: `Template: ${t.name}, target weight: ${t.weights?.[i] || 0}%` });
-        });
-        return p;
-      }, (m) => { refused = m; });
+      let refusedCard = null;
+      // All of it or none: a refused write takes the new portfolio back.
+      const portfolio = Storage && Storage.attempt(() => Storage.createPortfolioWithHoldings({ name: t.name, baseCurrency: 'USD', icon: 'barChart' },
+        (t.tickers || []).map((ticker, i) => ({ symbol: ticker, name: ticker.split('.')[0], type: (window.PortfolioCalculations && window.PortfolioCalculations.knownAssetType(ticker)) || 'stock', notes: `Template: ${t.name}, target weight: ${t.weights?.[i] || 0}%` }))),
+      (m, e) => { refused = m; if (e && e.code === 'free-limit' && e.refusal) refusedCard = e.refusal; });
+      if (refusedCard) { setAdoptWall(Object.assign({}, refusedCard, { adoptKey: key })); return; }
       id = portfolio ? portfolio.id : null;
       if (id && window.PortfolioFillNames) window.PortfolioFillNames(id, apiKey);
     }
@@ -382,7 +397,9 @@ window.PortfolioCatalogView = ({ apiKey, theme, onAdopt, onClose, onOpenPortfoli
         React.createElement('button', { onClick: cancelAdoptAsk, style: { padding: '8px 12px', borderRadius: 4, border: '1px solid ' + _bd, background: 'none', color: _tc, cursor: 'pointer', fontSize: 13, fontFamily: "'Sora',sans-serif" } }, 'Cancel'));
     }
     const refusedHere = adoptError && adoptError.key === key;
+    const walledHere = adoptWall && adoptWall.adoptKey === key && window.PlanNotice && window.PlanNotice.RefusalCard;
     return React.createElement(React.Fragment, null,
+      walledHere && React.createElement(window.PlanNotice.RefusalCard, { refusal: adoptWall, isDark }),
       refusedHere && React.createElement('div', { role: 'alert', id: 'adopt-error-' + String(key).replace(/[^\w-]/g, '_'), style: { marginBottom: 8, padding: '10px 12px', borderRadius: 4, border: '1px solid rgba(239,68,68,0.35)', background: 'rgba(239,68,68,0.06)', fontSize: 13, lineHeight: 1.5, color: _tc } }, adoptError.text),
       React.createElement('button', { 'data-adopt-for': key, onClick: () => setAdoptAsk(key), 'aria-describedby': refusedHere ? 'adopt-error-' + String(key).replace(/[^\w-]/g, '_') : undefined, style: primary }, label));
   };
