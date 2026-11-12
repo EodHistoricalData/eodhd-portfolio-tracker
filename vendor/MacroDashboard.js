@@ -1,7 +1,8 @@
 // Portfolio Tracker - Macro Dashboard Component (Concept 3 Glassmorphism Design)
 // `pricesWhy`: why no position has a value, when the prices failed (the
-// shared words, Calc.unpricedWhy), else empty.
-window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, totalReturn, annualReturn, onClose, theme, onRetryPrices, pricesWhy }) => {
+// shared words, Calc.unpricedWhy), else empty. `pricesLeftOut`: the held
+// positions without a value, by ticker and why (Calc.unpricedLine).
+window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, totalReturn, annualReturn, onClose, theme, onRetryPrices, pricesWhy, pricesLeftOut }) => {
   const [macroData, setMacroData] = React.useState(null);
   const [treasuryRates, setTreasuryRates] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
@@ -385,9 +386,9 @@ window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, to
             {/* Some positions valued, some not for a failed request: the
                 return is of the valued ones, and says why the rest are not
                 in it, with Try again. */}
-            {Number.isFinite(totalReturn) && pricesWhy && (
+            {Number.isFinite(totalReturn) && (pricesLeftOut || pricesWhy) && (
               <div data-unpriced-why="true" style={{ marginTop: 8, fontSize: 12, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
-                <span role="status">{pricesWhy} The return leaves out the positions without a value.</span>
+                <span role="status">{pricesLeftOut || pricesWhy} The return leaves out the positions without a value.</span>
                 {onRetryPrices && (
                   <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />
                 )}

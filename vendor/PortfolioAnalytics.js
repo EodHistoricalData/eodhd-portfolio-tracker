@@ -295,6 +295,18 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
   const retryPrices = onRetryPrices ? (
     <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />
   ) : null;
+  // A figure worked out on the priced positions while others have none
+  // names those by ticker, with why, and asks for the prices again: the
+  // allocation read "GBX 0.0% ($0.00)", Risk "covering 100% of portfolio
+  // value" and Monte Carlo ran on the rest without a word. `tail`: what the
+  // view does without them.
+  const unpricedLineText = pricesLoading ? '' : Calc.unpricedLine(holdingsWithData, baseCurrency || 'USD');
+  const unpricedSyms = Calc.unpricedSymbols(holdingsWithData);
+  const leftOutLine = (tail, style) => (unpricedLineText && anyPricedHeld ? (
+    <p data-unpriced-why="true" style={{ margin: '0 0 12px', fontSize: 12, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight, ...style }}>
+      <span role="status">{unpricedLineText}{tail ? ' ' + tail : ''}</span>{retryPrices}
+    </p>
+  ) : null);
   // A tab whose price history did not come back says so, with the reason and
   // a Try again that counts the limit's wait down -- and, at the limit, it
   // loads again by itself once the wait is over (RateLimitWait.FailNote).
@@ -1535,6 +1547,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
         {/* Allocation Tab */}
         {activeTab === 'allocation' && (
           <>
+            {leftOutLine('The percentages are of the value that has a price.', compact ? { fontSize: 11, margin: '0 0 10px' } : undefined)}
             <div style={compact ? { ...styles.card, padding: 10, marginBottom: 10 } : styles.card}>
               <h3 style={{ fontWeight: 600, marginBottom: compact ? 10 : 16, marginTop: 0, fontSize: compact ? 12 : undefined }}>By Asset Type</h3>
               {allocationByType.length > 0 ? <AllocationBar data={allocationByType} colorMap={COLORS.type} labelMap={TYPE_LABELS} />
@@ -1591,6 +1604,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
               </div>
             ) : riskMetrics ? (
               <>
+                {leftOutLine('The risk figures leave out the positions without a value.')}
                 {/* Risk Level Summary */}
                 <div style={styles.card}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
@@ -1689,7 +1703,9 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                   <div style={{ fontSize: 11, marginTop: 10, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
                     {riskMetrics.insufficientHistory
                       ? (riskMetrics.historyFailed ? 'Volatility, Sharpe and VaR are measured on a year of daily prices.' : 'Volatility, Sharpe and VaR need at least 20 trading days of price history for the priced positions.')
-                      : `Measured over the last ${riskMetrics.historyDays} trading days at today's weights, covering ${(riskMetrics.covered * 100).toFixed(0)}% of portfolio value` +
+                      // A position with no price has no value to weigh: the
+                      // share is of the priced value, and the rest is named.
+                      : `Measured over the last ${riskMetrics.historyDays} trading days at today's weights, covering ${(riskMetrics.covered * 100).toFixed(0)}% of ${unpricedSyms.length ? `the priced value (${Calc.namesList(unpricedSyms)} not priced)` : 'portfolio value'}` +
                         (riskMetrics.maxDrawdown != null ? `; max drawdown ${riskMetrics.maxDrawdown.toFixed(1)}%` : '') +
                         (riskMetrics.annualReturn != null ? `; annualised return ${riskMetrics.annualReturn >= 0 ? '+' : ''}${riskMetrics.annualReturn.toFixed(1)}%` : '') + '.'}
                   </div>
@@ -1784,9 +1800,9 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                     <div style={{ fontWeight: 600, color: acc('#3b82f6') }}>{Calc.formatCurrency(performanceData[performanceData.length - 1]?.dividends || 0, baseCurrency)}</div>
                   </div>
                 </div>
-                {/* Why the value leaves positions out, when it is known. */}
-                {unpricedHeld > 0 && unpricedWhyText && (
-                  <p data-unpriced-why="true" style={{ margin: '0 0 16px', fontSize: 12, lineHeight: 1.5, textAlign: 'center', color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{unpricedWhyText}{retryPrices}</p>
+                {/* Which positions the value leaves out, and why. */}
+                {unpricedHeld > 0 && unpricedLineText && (
+                  <p data-unpriced-why="true" style={{ margin: '0 0 16px', fontSize: 12, lineHeight: 1.5, textAlign: 'center', color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{unpricedLineText}{retryPrices}</p>
                 )}
                 <div style={{ borderTop:`1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}`, paddingTop: 16 }}>
                   <div style={{ fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight, marginBottom: 8 }}>Investment History</div>
@@ -1834,8 +1850,10 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
               ) : dividendProjection ? (
                 <>
                   {dividendProjection.unpriced > 0 && (
-                    <p style={{ margin: '0 0 12px', fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
-                      Estimate leaves out {dividendProjection.unpriced} holding{dividendProjection.unpriced === 1 ? '' : 's'} with no current price.{unpricedWhyText ? ' ' + unpricedWhyText : ''}{unpricedWhyText ? retryPrices : null}
+                    <p data-unpriced-why="true" style={{ margin: '0 0 12px', fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+                      {unpricedLineText
+                        ? <><span role="status">{unpricedLineText} The estimate leaves out the positions without a value.</span>{retryPrices}</>
+                        : `Estimate leaves out ${dividendProjection.unpriced} holding${dividendProjection.unpriced === 1 ? '' : 's'} with no current price.`}
                     </p>
                   )}
                   {dividendProjection.partial > 0 && (
@@ -2021,12 +2039,13 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                   {benchmarkData.lastYear ? (
                   <div style={{ paddingTop: 16, marginTop: 16, borderTop: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}`, fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight, lineHeight: 1.5 }}>
                     Compared over the last year (since {benchmarkData.since}): the positions you hold today, at today's weights{benchmarkData.covered != null && benchmarkData.covered < 0.995 ? `, ${Math.round(benchmarkData.covered * 100)}% of the portfolio's value` : ''}, against SPY.{benchmarkData.cut ? ' Older history needs a paid plan.' : ''}
+                    {unpricedLineText && anyPricedHeld ? <> <span data-unpriced-why="true" role="status">{unpricedLineText} The comparison leaves out the positions without a value.</span>{retryPrices}</> : null}
                   </div>
                   ) : (
                   <div style={{ paddingTop: 16, marginTop: 16, borderTop: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}`, fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight, lineHeight: 1.5 }}>
                     Since {benchmarkData.since}. Total return over everything paid in: {benchmarkData.totalReturnPercent == null ? 'n/a' : Calc.formatPercent(benchmarkData.totalReturnPercent)}
-                    {benchmarkData.excluded ? ` — ${benchmarkData.excluded} unpriced position${benchmarkData.excluded === 1 ? '' : 's'} left out` : ''}.
-                    {benchmarkData.excluded && unpricedWhyText ? ' ' + unpricedWhyText : ''}
+                    {benchmarkData.excluded && !unpricedLineText ? ` — ${benchmarkData.excluded} unpriced position${benchmarkData.excluded === 1 ? '' : 's'} left out` : ''}.
+                    {benchmarkData.excluded && unpricedLineText ? <> <span data-unpriced-why="true" role="status">{unpricedLineText} The return leaves out the positions without a value.</span>{retryPrices}</> : null}
                   </div>
                   )}
                 </div>
@@ -2233,6 +2252,9 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                 + ' ' + [...fanChart].reverse().map((d, i) => `L${scaleX(d).toFixed(1)},${scaleY(d.p10).toFixed(1)}`).join(' ') + ' Z';
 
               return React.createElement(React.Fragment, null,
+                // Positions with no price are not in the starting value:
+                // named, with why (it ran on the rest without a word).
+                leftOutLine('The simulation starts from the value that has a price and leaves them out.'),
                 // A run again that failed: the last simulation stays, and the
                 // failure is said above it.
                 monteCarloData.refreshFailed && React.createElement(RLW.FailNote, {
@@ -2298,8 +2320,8 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                 React.createElement('div', { style: { ...(isDark ? { background: 'rgba(255,255,255,0.05)' } : { background: 'rgba(0,0,0,0.05)' }), borderRadius: 12, padding: 12, fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight } },
                   React.createElement('strong', null, 'How it works:'), ' 500 random simulations based on the last year of daily returns ' +
                     (monteCarloData.positionsTotal > monteCarloData.positionsUsed
-                      ? `of your ${monteCarloData.positionsUsed} largest positions (of ${monteCarloData.positionsTotal}), ${Math.round((monteCarloData.covered || 0) * 100)}% of portfolio value, at today's weights; the rest is assumed to move the same way.`
-                      : `of your positions at today's weights${monteCarloData.covered != null && monteCarloData.covered < 0.995 ? ` (${Math.round(monteCarloData.covered * 100)}% of portfolio value; manual assets are left out)` : ''}.`) +
+                      ? `of your ${monteCarloData.positionsUsed} largest positions (of ${monteCarloData.positionsTotal}), ${Math.round((monteCarloData.covered || 0) * 100)}% of ${unpricedSyms.length ? 'the priced value' : 'portfolio value'}, at today's weights; the rest is assumed to move the same way.`
+                      : `of your positions at today's weights${monteCarloData.covered != null && monteCarloData.covered < 0.995 ? ` (${Math.round(monteCarloData.covered * 100)}% of ${unpricedSyms.length ? 'the priced value' : 'portfolio value'}; manual assets are left out)` : ''}.`) +
                     ' The expected return is last year\'s average, not a forecast. The fan shows the range of outcomes (10th to 90th percentile); the orange line is the median.'
                 )
               );

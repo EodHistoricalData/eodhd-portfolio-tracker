@@ -35,7 +35,8 @@ function asObject(raw, fallback) {
  *  - 'portfolio-gone': the portfolio was deleted in another tab, and a
  *    position added here went to an id no portfolio has;
  *  - 'changed': the record was changed or deleted in another tab since this
- *    form loaded it, and saving would overwrite that.
+ *    form loaded it, and saving would overwrite that;
+ *  - 'blocked': the browser refuses the site's storage altogether.
  */
 class PortfolioStorageError extends Error {
   constructor(code, message) { super(message); this.name = 'PortfolioStorageError'; this.code = code; }
@@ -55,6 +56,12 @@ const UNREADABLE_MESSAGE = 'Saved portfolio data in this browser cannot be read,
 const UNREADABLE_BACKUP_KEY = 'eodhd_pt_unreadable_backup';
 
 const STORAGE_FULL_MESSAGE = "Your browser's storage for this site is full — nothing was saved. Export a backup and delete old portfolios or transactions, then try again.";
+// A browser that refuses the site's storage outright: Firefox with site
+// data turned off throws SecurityError on every read. Each read answered
+// [] and the tracker drew "Select portfolio", "0 holdings", "Loading
+// prices…" for ever, and Add Position said "This portfolio was deleted".
+const BLOCKED_MESSAGE = 'This browser blocks site storage, so portfolios cannot be kept here. Allow storage for this site or use another browser.';
+let blockedProbe = null;
 
 window.PortfolioStorage = {
   StorageError: PortfolioStorageError,
@@ -78,6 +85,25 @@ window.PortfolioStorage = {
 
   // Nothing is refused here in a standalone app (shell/shims.js).
   _freeLimit() {},
+  // Whether the browser refuses this site's storage (any read throws, or
+  // there is no localStorage at all; storageGuard.js, first in the
+  // bundle, puts a store kept only for the page in its place and says so).
+  // Asked once a page: allowing storage takes a reload.
+  storageBlocked() {
+    if (blockedProbe == null) {
+      if (window.STORAGE_BLOCKED === true) blockedProbe = true;
+      else {
+        try { window.localStorage.getItem(this.KEYS.PORTFOLIOS); blockedProbe = false; } catch (e) { blockedProbe = true; }
+      }
+    }
+    return blockedProbe;
+  },
+  BLOCKED_MESSAGE,
+  // Every write says why it cannot happen, rather than a portfolio or a
+  // position "deleted in another tab".
+  _refuseBlocked() {
+    if (this.storageBlocked()) throw new PortfolioStorageError('blocked', BLOCKED_MESSAGE);
+  },
   // Storage keys
   KEYS: {
     PORTFOLIOS: 'eodhd_pt_portfolios',
@@ -106,7 +132,8 @@ window.PortfolioStorage = {
       const data = localStorage.getItem(this.KEYS.PORTFOLIOS);
       return asArray(data);
     } catch (e) {
-      console.error('Error loading portfolios:', e);
+      // A blocked store is said once, by the tracker; not on every read.
+      if (!this.storageBlocked()) console.error('Error loading portfolios:', e);
       return [];
     }
   },
@@ -124,6 +151,7 @@ window.PortfolioStorage = {
   },
 
   createPortfolio(data) {
+    this._refuseBlocked();
     const portfolio = {
       id: this.generateId(),
       name: data.name || 'My Portfolio',
@@ -220,7 +248,8 @@ window.PortfolioStorage = {
           ? h : { ...h, symbol: text(h.symbol), name: text(h.name) }
       ));
     } catch (e) {
-      console.error('Error loading holdings:', e);
+      // A blocked store is said once, by the tracker; not on every read.
+      if (!this.storageBlocked()) console.error('Error loading holdings:', e);
       return [];
     }
   },
@@ -259,6 +288,7 @@ window.PortfolioStorage = {
   },
 
   createHolding(data) {
+    this._refuseBlocked();
     // Only into a portfolio that exists now, in storage -- not in this tab's
     // memory of it.
     if (!data.portfolioId || !this.getPortfolios().some(p => p.id === data.portfolioId)) {
@@ -288,6 +318,7 @@ window.PortfolioStorage = {
   },
 
   updateHolding(id, updates) {
+    this._refuseBlocked();
     const holdings = this.getHoldings();
     const index = holdings.findIndex(h => h.id === id);
     if (index === -1) throw new PortfolioStorageError('gone', HOLDING_GONE_MESSAGE);
@@ -319,7 +350,8 @@ window.PortfolioStorage = {
       const data = localStorage.getItem(this.KEYS.TRANSACTIONS);
       return asArray(data);
     } catch (e) {
-      console.error('Error loading transactions:', e);
+      // A blocked store is said once, by the tracker; not on every read.
+      if (!this.storageBlocked()) console.error('Error loading transactions:', e);
       return [];
     }
   },
@@ -350,6 +382,7 @@ window.PortfolioStorage = {
   },
 
   createTransaction(data) {
+    this._refuseBlocked();
     if (data && data.holdingId && !this.getHoldingById(data.holdingId)) throw new PortfolioStorageError('gone', HOLDING_GONE_MESSAGE);
     const transaction = {
       id: this.generateId(),
@@ -382,6 +415,7 @@ window.PortfolioStorage = {
     // for a close (a transfer in with no price) booked "transfer_in 2" for a
     // MSFT deleted meanwhile in another tab -- a trade nothing shows.
     // Nothing is written then.
+    this._refuseBlocked();
     const ids = new Set(this.getHoldings().map(h => h.id));
     if ((list || []).some(data => data && data.holdingId && !ids.has(data.holdingId))) throw new PortfolioStorageError('gone', HOLDING_GONE_MESSAGE);
     const made = (list || []).map(data => ({
@@ -410,6 +444,7 @@ window.PortfolioStorage = {
    * silently undid that change.
    */
   updateTransaction(id, updates, baseline) {
+    this._refuseBlocked();
     const transactions = this.getTransactions();
     const index = transactions.findIndex(t => t.id === id);
     if (index === -1) {
@@ -1178,6 +1213,7 @@ window.PortfolioStorage = {
   UNREADABLE_BACKUP_KEY,
 
   _refuseUnreadable(key) {
+    this._refuseBlocked();
     if (this._overwriting) return;
     if (this.unreadableKeys().indexOf(key) === -1) return;
     this.keepUnreadable();

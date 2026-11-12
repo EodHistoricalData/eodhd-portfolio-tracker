@@ -104,7 +104,10 @@ window.RebalancingAdvisor = ({ holdings, holdingsData, theme, onClose, onRetryPr
     const PC = window.PortfolioCalculations;
     // Some held, not all: the total leaves them out, and says why too.
     const why = PC && PC.unpricedWhy ? PC.unpricedWhy(rows, currency) : '';
-    return { totalValue, count, types, currency, needsPrices, why };
+    // Those left out, by ticker and why: the currency and the reason did not
+    // say which positions they were once there were several.
+    const leftOut = PC && PC.unpricedLine ? PC.unpricedLine(rows, currency) : '';
+    return { totalValue, count, types, currency, needsPrices, why, leftOut };
   }, [holdings, holdingsData]);
 
   // Target weights a template or an AI build left in each position's note
@@ -204,9 +207,9 @@ window.RebalancingAdvisor = ({ holdings, holdingsData, theme, onClose, onRetryPr
                   )}
                 </div>
               )}
-              {!portfolioSummary.needsPrices && portfolioSummary.why && (
+              {!portfolioSummary.needsPrices && (portfolioSummary.leftOut || portfolioSummary.why) && (
                 <div data-unpriced-why="true" style={{ fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
-                  <span role="status">{portfolioSummary.why} The total leaves out the positions without a value.</span>
+                  <span role="status">{portfolioSummary.leftOut || portfolioSummary.why} The total leaves out the positions without a value.</span>
                   {onRetryPrices && (
                     <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 6, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer' }} />
                   )}

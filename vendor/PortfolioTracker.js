@@ -2107,6 +2107,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
               // none of them or some -- and Try again.
               onRetryPrices: unpricedCount > 0 ? retryPrices : null,
               pricesWhy: Calc.unpricedWhy(openUnpriced, activePortfolio?.baseCurrency || 'USD'),
+              pricesLeftOut: Calc.unpricedLine(openUnpriced, activePortfolio?.baseCurrency || 'USD'),
               onClose: () => setWebTab('overview'), theme,
             })}
           </div>
@@ -3006,6 +3007,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
               annualReturn: !noneValued && moneyWeighted ? moneyWeighted.annual : null, // money-weighted (IRR)
             onRetryPrices: unpricedCount > 0 ? retryPrices : null,
             pricesWhy: Calc.unpricedWhy(openUnpriced, activePortfolio?.baseCurrency || 'USD'),
+            pricesLeftOut: Calc.unpricedLine(openUnpriced, activePortfolio?.baseCurrency || 'USD'),
             onClose: () => setShowMacroDashboard(false),
             theme: theme
           })}
@@ -3143,6 +3145,18 @@ window.PortfolioTrackerBoundary = (() => {
   };
   Boundary.prototype.render = function () {
     const S = window.PortfolioStorage;
+    // A browser that refuses the site's storage: one line in place of the
+    // portfolio. Every read answered nothing, and the tracker drew "Select
+    // portfolio", "0 holdings" and "Loading prices…" for ever; Add Position
+    // said the portfolio "was deleted".
+    if (!this.state.error && S.storageBlocked && S.storageBlocked()) {
+      const isDarkB = this.props.theme === 'dark';
+      const C3b = window.C3 || {};
+      // In a wrapper of its own: the web makes every child of the page 100%
+      // wide, and the panel's side margin ran it 4 px past a 390 px screen.
+      return React.createElement('div', null, React.createElement('div', { role: 'status', 'data-pt-recovery': 'blocked', style: { margin: 16, padding: '16px 20px', borderRadius: 8, border: `1px solid ${isDarkB ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)'}`, background: isDarkB ? '#1C1A14' : '#ffffff', color: isDarkB ? (C3b.textDark || '#E9E6DF') : (C3b.textLightTheme || '#1e1b4b'), fontSize: 14, lineHeight: 1.6 } },
+        S.BLOCKED_MESSAGE));
+    }
     // A saved list that does not parse is shown here before anything draws
     // from it: it read as an empty portfolio, and the next write replaced it.
     // Its text as found is kept aside first.
@@ -3236,7 +3250,9 @@ window.PortfolioTrackerBoundary = (() => {
     });
     const e = React.createElement;
     const readFail = !this.state.error && unreadable.length > 0;
-    return e('div', { role: 'alert', 'data-pt-recovery': readFail ? 'unreadable' : 'error', style: { margin: 16, padding: '20px 24px', borderRadius: 8, border: `1px solid ${isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)'}`, background: isDark ? '#1C1A14' : '#ffffff', color: text, lineHeight: 1.6 } },
+    // In a wrapper of its own, as the blocked-storage line: 100% wide plus its
+    // margin, the panel ran past the right edge of a phone on the web.
+    return e('div', null, e('div', { role: 'alert', 'data-pt-recovery': readFail ? 'unreadable' : 'error', style: { margin: 16, padding: '20px 24px', borderRadius: 8, border: `1px solid ${isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)'}`, background: isDark ? '#1C1A14' : '#ffffff', color: text, lineHeight: 1.6 } },
       e('div', { style: { fontSize: 15, fontWeight: 700, marginBottom: 8 } }, readFail ? 'Some portfolio data saved in this browser cannot be read' : 'The portfolio could not be drawn from the data saved in this browser'),
       e('p', { style: { margin: '0 0 8px', fontSize: 14, color: muted } },
         readFail
@@ -3275,7 +3291,7 @@ window.PortfolioTrackerBoundary = (() => {
           e('button', { style: btn(false), onClick: askNo, autoFocus: true }, 'Cancel'),
           e('button', { style: btn(true), onClick: askYes }, this.state.ask.step === 'restore' ? 'Replace' : this.state.ask.step === 1 ? 'Download a copy and continue' : 'Delete'))),
       this.state.notice && e('p', { role: 'status', style: { margin: '12px 0 0', fontSize: 13, color: text } }, this.state.notice)
-    );
+    ));
   };
   return Boundary;
 })();

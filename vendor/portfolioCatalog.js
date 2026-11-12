@@ -3,28 +3,42 @@
 // A portfolio made from tickers alone (a template, an AI Builder result) had
 // the bare code as every position's name ("JNJ", "PG", "KO"). The search's name is put in where the name is still the code; a
 // failed or empty search leaves it. Resolves to how many names were filled.
-window.PortfolioFillNames = async (portfolioId, apiKey) => {
+// At the per-minute limit the searches left are not sent, and the names
+// stayed codes for good: the fill stops there and runs again once the wait
+// is over (`tries`: how many times it has run again, up to three).
+window.PortfolioFillNames = async (portfolioId, apiKey, tries) => {
+  const FILL_TRIES = 3;
   const Storage = window.PortfolioStorage;
   const API = window.EODHD_API;
   if (!Storage || !API || !API.searchStocks) return 0;
+  const RLW = window.RateLimitWait;
   const usLike = (e) => ['US', 'NYSE', 'NASDAQ', 'AMEX', 'BATS', 'NYSE ARCA', 'ARCA'].indexOf(String(e || '').toUpperCase()) !== -1;
   let filled = 0;
+  let limited = false;
   for (const h of Storage.getHoldingsByPortfolio(portfolioId)) {
     const sym = String(h.symbol || '').toUpperCase();
     const code = sym.split('.')[0];
     const ex = sym.split('.').slice(1).join('.') || 'US';
     if (!code || (h.name && h.name.toUpperCase() !== code)) continue;
     try {
-      const rows = await API.searchStocks(apiKey, code);
+      const rows = await API.searchStocks(apiKey, code, { throwErrors: true });
       const hit = Array.isArray(rows) && rows.find((r) => r && String(r.Code || '').toUpperCase() === code
         && (String(r.Exchange || '').toUpperCase() === ex || (usLike(ex) && usLike(r.Exchange))));
       if (hit && hit.Name && hit.Name.toUpperCase() !== code) {
         // The holding may be gone by now (deleted in the meantime).
         if (Storage.getHoldingById(h.id)) { Storage.attempt(() => Storage.updateHolding(h.id, { name: hit.Name }), () => {}); filled += 1; }
       }
-    } catch (_) { /* the code stays the name */ }
+    } catch (e) {
+      // The code stays the name; at the limit, until the wait is over.
+      const f = RLW && RLW.outage ? RLW.outage(e) : null;
+      if (f && f.limited) { limited = true; break; }
+    }
   }
   if (filled) window.dispatchEvent(new CustomEvent('portfolio:names-filled', { detail: { portfolioId } }));
+  if (limited && (tries || 0) < FILL_TRIES) {
+    const until = (RLW && RLW.until && RLW.until()) || 0;
+    setTimeout(() => { window.PortfolioFillNames(portfolioId, apiKey, (tries || 0) + 1); }, Math.max(until - Date.now(), 0) + 1000);
+  }
   return filled;
 };
 
@@ -73,6 +87,9 @@ window.PortfolioCatalogView = ({ apiKey, theme, onAdopt, onClose, onOpenPortfoli
   // are ~99KB on the wire and the catalogue has seven funds in it.
   // Only the setter is kept; it exists to re-render once the fetch lands.
   const [, bumpHoldings] = React.useState(0);
+  // Holdings that did not load (the per-minute limit, EODHD's error) are
+  // asked again by Try again, or by themselves once the wait is over.
+  const [holdingsTry, setHoldingsTry] = React.useState(0);
   React.useEffect(() => {
     const tpl = selectedTemplate;
     if (!tpl || tpl.category !== 'fund' || !window.hydrateFundTemplate) return;
@@ -80,7 +97,7 @@ window.PortfolioCatalogView = ({ apiKey, theme, onAdopt, onClose, onOpenPortfoli
     let alive = true;
     window.hydrateFundTemplate(tpl, apiKey).then(() => { if (alive) bumpHoldings((n) => n + 1); });
     return () => { alive = false; };
-  }, [selectedTemplate, apiKey]);
+  }, [selectedTemplate, apiKey, holdingsTry]);
   // Check for AI Hub navigation on mount + poll for flag
   React.useEffect(() => {
     const check = () => {
@@ -470,6 +487,13 @@ window.PortfolioCatalogView = ({ apiKey, theme, onAdopt, onClose, onOpenPortfoli
         t.category === 'fund' && t._holdingsState === 'loading' && React.createElement('span', { style: { color: _tm, fontStyle: 'italic' } }, 'loading live holdings…'),
         t.category === 'fund' && t._holdingsState === 'error' && React.createElement('span', { style: { color: _ink('#ef4444') } }, 'holdings unavailable'),
       ),
+      // Holdings that did not load, with the reason -- the limit by name --
+      // and a Try again that counts the wait down. They read "holdings
+      // unavailable" and were never asked again in the session.
+      t.category === 'fund' && t._holdingsState === 'failed' && window.RateLimitWait && React.createElement(window.RateLimitWait.FailNote, {
+        what: 'The holdings', failure: t._holdingsFailure, isDark, panel: 'fund-holdings:' + (t.fundTicker || t.id),
+        onRetry: () => setHoldingsTry((n) => n + 1), style: { marginBottom: 20 },
+      }),
       // Holdings table
       React.createElement('div', { style: { background: _bg, border: '1px solid ' + _bd, borderRadius: 4, overflow: 'hidden', marginBottom: 20 } },
         React.createElement('table', { style: { width: '100%', borderCollapse: 'collapse' } },
@@ -566,7 +590,7 @@ window.PortfolioCatalogView = ({ apiKey, theme, onAdopt, onClose, onOpenPortfoli
         : React.createElement('button', {
           disabled: true,
           style: { width: '100%', padding: '14px', borderRadius: 4, border: 'none', background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)', color: _tm, fontWeight: 700, fontSize: 14, cursor: 'not-allowed', fontFamily: "'Sora',sans-serif" }
-        }, t._holdingsState === 'loading' ? 'Loading holdings…' : 'Holdings reported without tickers')
+        }, t._holdingsState === 'loading' ? 'Loading holdings…' : t._holdingsState === 'failed' ? 'Holdings did not load' : 'Holdings reported without tickers')
     );
   }
 

@@ -15,7 +15,7 @@ npm start                 # http://localhost:5173
 ```
 
 Put your EODHD API key in `.env` — [get one here](https://eodhd.com/register?utm_source=eodhd_oss&utm_medium=app&utm_campaign=portfolio-tracker&utm_content=readme).
-A free key is enough to try it. Positions are priced from real-time quotes, one request each, so the free tier's twenty requests a day are the limit you will meet first. There is no demo mode: without a key the app tells you so
+A free key is enough for your own positions: each is priced from a live quote, one request, so the free plan's twenty requests a day are the limit you will meet first. Fund templates read fundamentals, which need All-In-One or the Fundamentals Data Feed. There is no demo mode: without a key the app tells you so
 and does nothing else.
 
 Tested in current Chrome and Firefox on Node 20 and 24. Other browsers
@@ -43,7 +43,7 @@ through the screens you visited.
 
 ## What it needs from your plan
 
-Positions are priced from the EODHD real-time endpoint, and the fund templates read holdings from fundamentals. Both are on the free tier; the free tier's twenty requests a day is the limit you will meet first, not the plan.
+Positions are priced from EODHD live quotes (stock prices are delayed 15 to 20 minutes), which the free plan includes; its twenty requests a day are the limit you will meet first. The fund templates read holdings from fundamentals, which come with All-In-One and the Fundamentals Data Feed, not with the free plan.
 
 When a request comes back `403`, the app shows you EODHD's own explanation of
 what is missing rather than a generic error.

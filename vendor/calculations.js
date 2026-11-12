@@ -814,7 +814,15 @@ window.PortfolioCalculations = {
   /**
    * Calculate allocation by type
    */
-  getAllocationByType(holdingsWithData) {
+  // The rows an allocation is of: the positions with a value. One with no
+  // price has an unknown value, not a value of zero -- it read "GBX 0.0%
+  // ($0.00)" beside "USD 100.0%"; the views name it on a line of its own.
+  pricedRows(holdingsWithData) {
+    return (holdingsWithData || []).filter(h => h && !h.priceUnavailable);
+  },
+
+  getAllocationByType(rows) {
+    const holdingsWithData = this.pricedRows(rows);
     const totalValue = this.getTotalValue(holdingsWithData);
     if (totalValue === 0) return [];
 
@@ -855,7 +863,8 @@ window.PortfolioCalculations = {
     return (h && h.sector) || null;
   },
 
-  getAllocationBySector(holdingsWithData) {
+  getAllocationBySector(rows) {
+    const holdingsWithData = this.pricedRows(rows);
     const totalValue = this.getTotalValue(holdingsWithData);
     if (totalValue === 0) return [];
     if (!holdingsWithData.some(h => this.sectorOf(h))) return [];
@@ -876,7 +885,8 @@ window.PortfolioCalculations = {
   /**
    * Get allocation by country/region
    */
-  getAllocationByCountry(holdingsWithData) {
+  getAllocationByCountry(rows) {
+    const holdingsWithData = this.pricedRows(rows);
     const totalValue = this.getTotalValue(holdingsWithData);
     if (totalValue === 0) return [];
 
@@ -947,7 +957,8 @@ window.PortfolioCalculations = {
   /**
    * Calculate allocation by currency
    */
-  getAllocationByCurrency(holdingsWithData) {
+  getAllocationByCurrency(rows) {
+    const holdingsWithData = this.pricedRows(rows);
     const totalValue = this.getTotalValue(holdingsWithData);
     if (totalValue === 0) return [];
 
@@ -2142,6 +2153,62 @@ window.PortfolioCalculations = {
       if (c && codes.indexOf(c) === -1) codes.push(c);
     });
     return codes.length ? `No price on record for ${codes.join(', ')}.` : '';
+  },
+
+  /**
+   * The held positions left without a value, by ticker, in the order held.
+   * A view that leaves them out names them: a count and a currency did not
+   * say which positions fell out once there were several.
+   */
+  unpricedSymbols(rows) {
+    const out = [];
+    (rows || []).forEach((r) => {
+      if (!r || !r.priceUnavailable || !(Number(r.quantity) > 0)) return;
+      const s = String(r.symbol || r.name || '').trim();
+      if (s && out.indexOf(s) === -1) out.push(s);
+    });
+    return out;
+  },
+
+  // "A, B, C and 4 more": the first `max` named, the rest counted.
+  namesList(list, max) {
+    const n = max || 6;
+    const all = list || [];
+    if (all.length <= n) return all.join(', ');
+    return `${all.slice(0, n).join(', ')} and ${all.length - n} more`;
+  },
+
+  /**
+   * One line for the positions a figure leaves out: how many, which, and
+   * why -- "1 without a price: VOD.LSE — the GBX/USD rate did not load:
+   * EODHD answered with an error (500)." Positions left out for the same
+   * reason are named together. '' when every held position has a value.
+   */
+  unpricedLine(rows, baseCurrency) {
+    const RLW = window.RateLimitWait;
+    const reason = (f) => (RLW && RLW.failReason ? RLW.failReason(f) : '');
+    const held = (rows || []).filter(r => r && r.priceUnavailable && Number(r.quantity) > 0);
+    if (!held.length) return '';
+    const groups = [];
+    const byWhy = {};
+    held.forEach((r) => {
+      const sym = String(r.symbol || r.name || '').trim();
+      let why = '';
+      if (r.fxUnavailable) {
+        const pair = `${r.currency}/${baseCurrency || 'USD'}`;
+        why = r.fxFail && reason(r.fxFail) ? `the ${pair} rate did not load: ${reason(r.fxFail)}` : `the ${pair} rate did not load.`;
+      } else if (r.noRecord) why = 'no price on record.';
+      else if (r.priceFail && reason(r.priceFail)) why = `the price did not load: ${reason(r.priceFail)}`;
+      let g = byWhy[why];
+      if (!g) { g = byWhy[why] = { why, syms: [] }; groups.push(g); }
+      if (sym && g.syms.indexOf(sym) === -1) g.syms.push(sym);
+    });
+    const parts = groups.map((g) => {
+      const names = this.namesList(g.syms);
+      if (!names) return g.why ? g.why.charAt(0).toUpperCase() + g.why.slice(1) : '';
+      return g.why ? `${names} — ${g.why}` : `${names}.`;
+    }).filter(Boolean);
+    return `${held.length} without a price: ${parts.join(' ')}`.trim();
   },
 
   /**

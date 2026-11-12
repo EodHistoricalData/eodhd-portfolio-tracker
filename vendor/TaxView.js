@@ -85,14 +85,15 @@ window.TaxView = function TaxView({ portfolioId, holdings, holdingsData, baseCur
     return prices;
   }, [holdings, holdingsData]);
 
-  // Why held positions have no value (a currency rate or a quote that did
-  // not load), in the shared words, or '': they cannot be candidates, and
+  // The held positions with no value (a currency rate or a quote that did
+  // not load), by ticker and why, or '': they cannot be candidates, and
   // the list said nothing -- a GBP position $11M under its cost vanished
-  // from it when the GBP/USD rate failed.
+  // from it when the GBP/USD rate failed. The currency alone did not say
+  // which positions they were.
   const unpricedWhy = React.useMemo(() => {
     const PC = window.PortfolioCalculations;
     const rows = (holdings || []).map(h => holdingsData?.[h.id]).filter(Boolean);
-    return PC && PC.unpricedWhy ? PC.unpricedWhy(rows, baseCurrency || 'USD') : '';
+    return PC && PC.unpricedLine ? PC.unpricedLine(rows, baseCurrency || 'USD') : PC && PC.unpricedWhy ? PC.unpricedWhy(rows, baseCurrency || 'USD') : '';
   }, [holdings, holdingsData, baseCurrency]);
 
   const harvestingCandidates = React.useMemo(

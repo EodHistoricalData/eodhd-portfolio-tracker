@@ -1145,10 +1145,13 @@ window.hydrateFundTemplate = async function (template, apiKey) {
 
   template._holdingsState = 'loading';
   const noHoldings = (message) => { const err = new Error(message); err.noHoldings = true; return err; };
+  // What the feed itself threw, kept apart from a fault in reading its answer.
+  let askFailed = null;
+  const ask = (p) => Promise.resolve(p).catch((e) => { askFailed = e; throw e; });
 
   try {
     if (template.holdingsSource === 'etf') {
-      const raw = await API.getFundHoldings(apiKey, template.fundTicker);
+      const raw = await ask(API.getFundHoldings(apiKey, template.fundTicker, { throwErrors: true }));
       // "NA" arrives as a string when the symbol is not an ETF after all.
       if (!raw || typeof raw !== 'object') throw noHoldings('no ETF holdings for ' + template.fundTicker);
 
@@ -1171,7 +1174,7 @@ window.hydrateFundTemplate = async function (template, apiKey) {
       template.feedCapped = rows.length >= window.FUND_FEED_CAP;
       template.copyable = true;
     } else {
-      const raw = await API.getMutualFundTopHoldings(apiKey, template.fundTicker);
+      const raw = await ask(API.getMutualFundTopHoldings(apiKey, template.fundTicker, { throwErrors: true }));
       if (!raw || typeof raw !== 'object') throw noHoldings('no fund holdings for ' + template.fundTicker);
 
       // Numeric string keys, and each row carries a name but no ticker.
@@ -1194,12 +1197,48 @@ window.hydrateFundTemplate = async function (template, apiKey) {
 
     template._holdingsState = 'ready';
   } catch (e) {
-    // A fund the feed lists no holdings for is an answer, not a fault: the
-    // card says so, and the console stays clean.
-    if (!(e && e.noHoldings)) console.error('[templates] hydrate failed for', template.fundTicker, e);
-    template._holdingsState = 'error';
+    // The holdings did not load -- the per-minute limit, EODHD's error, no
+    // connection, an answer that could not be read: 'failed', with what it
+    // was, and asked again (portfolioCatalog.js). It read "holdings
+    // unavailable" for the rest of the session, and a 429 body read on the
+    // Mini App's own key was taken for a fund with no holdings at all.
+    const RLW = window.RateLimitWait;
+    const failed = e === askFailed && RLW && RLW.outage ? RLW.outage(e) : null;
     template.copyable = false;
+    if (failed) {
+      template._holdingsState = 'failed';
+      template._holdingsFailure = failed;
+      return template;
+    }
+    // A fund the feed lists no holdings for is an answer, not a fault: the
+    // card says so, and the console stays clean. So is a
+    // refusal with a status (a 404, the plan's 403), which the API line
+    // has logged already.
+    if (!(e && (e.noHoldings || e.status || e.statusCode))) console.error('[templates] hydrate failed for', template.fundTicker, e);
+    template._holdingsState = 'error';
   }
 
   return template;
 };
+
+// A second ask while a template's holdings are on their way shares that
+// ask, so every view waiting on it hears when it settles. It returned at
+// once: with Try again pressed twice, or the card left and opened again,
+// the view that asked last was never told, and read "Loading holdings…"
+// for good.
+(function () {
+  const hydrate = window.hydrateFundTemplate;
+  const loads = new WeakMap();
+  window.hydrateFundTemplate = function (template, apiKey) {
+    const out = template && typeof template === 'object' ? loads.get(template) : null;
+    if (out && template._holdingsState === 'loading') return out;
+    const p = hydrate(template, apiKey);
+    // Still loading once the ask has gone: that is the one to share.
+    if (template && typeof template === 'object' && template._holdingsState === 'loading') {
+      loads.set(template, p);
+      const end = () => { if (loads.get(template) === p) loads.delete(template); };
+      p.then(end, end);
+    }
+    return p;
+  };
+})();

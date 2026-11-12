@@ -40,6 +40,9 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
   // dropped connection, an unreadable answer): said with its reason and a
   // Try again, not as "no insider transactions".
   const [insiderFail, setInsiderFail] = React.useState(null);
+  // The holdings whose feed did not load, when others' did: named, as
+  // "some holdings" did not say which.
+  const [insiderFailFor, setInsiderFailFor] = React.useState([]);
   const [insiderRefusal, setInsiderRefusal] = React.useState(null);
   const [earningsFail, setEarningsFail] = React.useState(null);
   const [, sectorsArrived] = React.useState(0);
@@ -176,6 +179,8 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
     }
     const allInsider = [];
     const insiderFails = [];
+    const failedFor = [];
+    let asked = 0;
 
     for (const holding of holdings) {
       if (holding.symbol && holding.type === 'stock') {
@@ -186,6 +191,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
           // rows frozen at 2026-04-24, so this tab was always empty. Form 4 covers US issuers only.
           const isUs = /\.US$/i.test(holding.symbol) || !holding.symbol.includes('.');
           if (!isUs || !window.InsiderTx) continue;
+          asked++;
           const payload = await window.EODHD_API.getInsiderForm4(apiKey, holding.symbol, { limit: 20, throwErrors: true });
           const rows = window.InsiderTx.flattenForm4(payload).slice(0, 10);
           rows.forEach(tx => {
@@ -209,6 +215,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
             return;
           }
           insiderFails.push(e || {});
+          if (window.RateLimitWait.outage(e || {}) && failedFor.indexOf(holding.symbol) === -1) failedFor.push(holding.symbol);
         }
       }
     }
@@ -217,6 +224,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
     allInsider.sort((a, b) => new Date(b.date || b.transactionDate) - new Date(a.date || a.transactionDate));
     setInsiderData(allInsider.slice(0, 50));
     setInsiderFail(window.RateLimitWait.outage(insiderFails));
+    setInsiderFailFor(failedFor.length < asked ? failedFor : []);
     setLoading(false);
   };
 
@@ -466,7 +474,10 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
               {/* Scored on what has a value; a position left without one by
                   a failed request is named, with Try again. */}
               {scoreState === 'ok' && (() => {
-                const w = window.PortfolioCalculations && window.PortfolioCalculations.unpricedWhy ? window.PortfolioCalculations.unpricedWhy(positions, baseCurrency || 'USD') : '';
+                // By ticker, with why: the currency and the reason did not say
+                // which positions fell out once there were several.
+                const PC = window.PortfolioCalculations;
+                const w = PC && PC.unpricedLine ? PC.unpricedLine(positions, baseCurrency || 'USD') : PC && PC.unpricedWhy ? PC.unpricedWhy(positions, baseCurrency || 'USD') : '';
                 if (!w) return null;
                 return (
                   <p data-unpriced-why="true" style={{ margin: '0 0 12px', fontSize: 13, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
@@ -655,7 +666,8 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
             {!loading && insiderRefusal && window.PlanNotice && window.PlanNotice.RefusalCard
               && React.createElement(window.PlanNotice.RefusalCard, { refusal: insiderRefusal, isDark })}
             {!loading && !insiderRefusal && insiderFail && React.createElement(window.RateLimitWait.FailNote, {
-              what: insiderData.length ? 'The insider feed for some holdings' : 'The insider feed',
+              what: insiderFailFor.length && Calc && Calc.namesList ? `The insider feed for ${Calc.namesList(insiderFailFor)}`
+                : insiderData.length ? 'The insider feed for some holdings' : 'The insider feed',
               failure: insiderFail, onRetry: loadInsiderActivity, isDark, panel: 'health-insider',
               style: { marginBottom: 12 },
             })}

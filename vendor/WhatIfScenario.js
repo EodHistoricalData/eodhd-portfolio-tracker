@@ -114,12 +114,13 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
   // whichever holding happened to come first.
   // Shares still held only: a position sold to zero was offered as the
   // source of a swap, which then said "Pick a held position to swap from".
-  // Why held positions have no value, in the shared words
-  // (Calc.unpricedWhy), or ''.
+  // The held positions with no value, by ticker and why (Calc.unpricedLine),
+  // or '': the currency and the reason did not say which positions fell out
+  // once there were several.
   const unpricedWhy = React.useMemo(() => {
     const PC = window.PortfolioCalculations;
     const rows = (holdings || []).map(h => holdingsData?.[h.id]).filter(Boolean);
-    return PC && PC.unpricedWhy ? PC.unpricedWhy(rows, baseCurrency || 'USD') : '';
+    return PC && PC.unpricedLine ? PC.unpricedLine(rows, baseCurrency || 'USD') : PC && PC.unpricedWhy ? PC.unpricedWhy(rows, baseCurrency || 'USD') : '';
   }, [holdings, holdingsData, baseCurrency]);
   const heldSymbols = React.useMemo(() => [...new Set(
     holdings.filter(h => h.symbol && holdingsData?.[h.id] && !holdingsData[h.id].priceUnavailable && Number(holdingsData[h.id].quantity) > 0).map(h => h.symbol)

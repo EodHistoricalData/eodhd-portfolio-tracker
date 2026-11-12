@@ -219,12 +219,14 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
   const exchangeCurrency = (exchange) => EXCHANGE_CCY[exchange] || null;
 
   // null when the search itself failed (offline, rate limited): that says
-  // nothing about the ticker, unlike an empty answer.
-  const search = async (q) => {
+  // nothing about the ticker, unlike an empty answer. What it threw goes
+  // into `fails`: the preview says why (the per-minute limit, EODHD's error)
+  // -- "the search did not answer" was all it said at the limit.
+  const search = async (q, fails) => {
     try {
       const hits = await window.EODHD_API.searchStocks(apiKey, q, { throwErrors: true });
       return Array.isArray(hits) ? hits : [];
-    } catch (e) { return null; }
+    } catch (e) { if (fails) fails.push(e); return null; }
   };
   const up = (v) => String(v || '').toUpperCase();
 
@@ -254,31 +256,38 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
   // with a sold position impossible to load; a typo
   // (ZZZQQ) has no history and is still refused. One end-of-day request
   // around the trade's date, only for a ticker the search did not find.
-  const tradedOnce = async (symbol, date) => {
+  // A failure goes into `fails` (as the search's): a history the limit cut
+  // off says nothing about the ticker, and the preview says so.
+  const tradedOnce = async (symbol, date, fails) => {
     if (!window.EODHD_API || !window.EODHD_API.getHistoricalData || !/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) return false;
     const day = Date.parse(date + 'T00:00:00Z');
     const iso = (t) => new Date(t).toISOString().slice(0, 10);
     try {
-      const rows = await window.EODHD_API.getHistoricalData(apiKey, symbol, iso(day - 10 * 86400000), iso(day + 10 * 86400000));
+      const rows = await window.EODHD_API.getHistoricalData(apiKey, symbol, iso(day - 10 * 86400000), iso(day + 10 * 86400000), undefined, { throwErrors: true });
       return Array.isArray(rows) && rows.length > 0;
-    } catch (e) { return false; }
+    } catch (e) { if (fails) fails.push(e); return false; }
   };
   // A current price for a code the search does not list: 0700.HK and
   // 9988.HK are not in the search, yet quote and close every day -- the
   // preview called them "no longer listed" and they came in priced.
   // A real-time close, else a close in the last ten
   // days, is a live listing.
-  const pricedNow = async (symbol) => {
+  const pricedNow = async (symbol, fails) => {
+    const priced = (q) => { const c = q && parseFloat(q.close); return Number.isFinite(c) && c > 0; };
     try {
-      const q = await window.EODHD_API.getRealTimeData(apiKey, symbol);
-      const c = q && parseFloat(q.close);
-      if (Number.isFinite(c) && c > 0) return true;
-    } catch (e) { /* asked the end of day instead */ }
+      if (priced(await window.EODHD_API.getRealTimeData(apiKey, symbol, { throwErrors: true }))) return true;
+    } catch (e) {
+      // Inside the wait a quote seen before still counts, as it did
+      // before the failure was kept.
+      const last = e && e.rateLimited && window.EODHD_API.lastQuote ? window.EODHD_API.lastQuote(symbol) : null;
+      if (priced(last)) return true;
+      if (fails) fails.push(e); /* asked the end of day instead */
+    }
     try {
       const iso = (t) => new Date(t).toISOString().slice(0, 10);
-      const rows = await window.EODHD_API.getHistoricalData(apiKey, symbol, iso(Date.now() - 10 * 86400000), iso(Date.now()));
+      const rows = await window.EODHD_API.getHistoricalData(apiKey, symbol, iso(Date.now() - 10 * 86400000), iso(Date.now()), undefined, { throwErrors: true });
       return Array.isArray(rows) && rows.length > 0;
-    } catch (e) { return false; }
+    } catch (e) { if (fails) fails.push(e); return false; }
   };
   // The listing this portfolio already holds for a code given without its
   // exchange, by the rule What-If uses (window.SymbolCode with the held
@@ -299,8 +308,16 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
   // counted (lookupKeyOf); the unit a row's price is in is that row's own
   // (resolveSymbol). Keyed with the cell, a file writing GBX, GBp and GBP
   // for VOD.LSE searched VOD.LSE three times.
+  // The two price checks of one lookup, each keeping what failed in that
+  // lookup's own `fails` (lookups run three at a time).
+  const checksInto = (fails) => ({
+    pricedNow: (symbol) => pricedNow(symbol, fails),
+    tradedOnce: (symbol, date) => tradedOnce(symbol, date, fails),
+  });
   const lookupSymbol = async (row) => {
-    let r = await resolveSymbolRaw(row);
+    const fails = [];
+    const { pricedNow, tradedOnce } = checksInto(fails);
+    let r = await resolveSymbolRaw(row, fails);
     // A price today first: it does not depend on the history request, which
     // a plan or a limit can refuse. Then history around the
     // trade, for a listing that is gone.
@@ -317,6 +334,15 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
       const searchSaid = !!(SC && SC.searched && SC.searched(r.symbol));
       if (!searchSaid && await pricedNow(r.symbol)) r = { ...r, found: true };
       else if (await tradedOnce(r.symbol, row.date)) r = { ...r, found: true, delisted: true };
+    }
+    // Why a check could not be made -- the per-minute limit, EODHD's error,
+    // no connection, an answer that could not be read (RateLimitWait.outage)
+    // -- for the preview's words and its Check again. A 404 or a plan's
+    // refusal of a price is an answer, and changes nothing here.
+    const RLW = window.RateLimitWait;
+    if (r.found !== true && fails.length && RLW) {
+      const failed = (RLW.outage && RLW.outage(fails)) || (r.found === null && RLW.failure ? RLW.failure(fails[0]) : null);
+      if (failed) r = { ...r, failed };
     }
     return r;
   };
@@ -341,7 +367,7 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
     const clash = r.index ? null : Calc.importCurrencyClash(row.currencyCell, r.currency, r.symbol, r.held);
     return { ...r, currency, unit, noCurrency, clash, type: typeOf(r.symbol, r.hit) };
   };
-  const resolveSymbolRaw = async (row) => {
+  const resolveSymbolRaw = async (row, fails) => {
     let raw = up(row.symbol).trim();
     const own = heldListing(raw, row.exchange);
     if (own) return { symbol: own.symbol, currency: own.holding.currency || exchangeCurrency(own.symbol.split('.').pop()) || null, found: true, hit: null, held: true };
@@ -378,7 +404,7 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
         if (d > 0 && SC.YAHOO[raw.slice(d + 1)] === exch) raw = raw.slice(0, d);
       }
       const code = raw.replace('.', '-');
-      const hits = await search(`${code}.${exch}`);
+      const hits = await search(`${code}.${exch}`, fails);
       const hit = (hits || []).find(h => up(h.Code) === code && up(h.Exchange) === exch);
       return { symbol: `${code}.${exch}`, currency: (hit && hit.Currency) || exchangeCurrency(exch), found: hits == null ? null : !!hit, hit };
     }
@@ -387,11 +413,11 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
     // BTC-USD-CC.US.
     const pair = raw.match(/^(.+)\.(CC|FOREX)$/);
     if (pair) {
-      const hits = await search(pair[1]);
+      const hits = await search(pair[1], fails);
       const hit = (hits || []).find(h => up(h.Code) === pair[1] && up(h.Exchange) === pair[2]);
       return { symbol: raw, currency: Calc.importPairCurrency(raw) || 'USD', found: hits == null ? null : !!hit, hit };
     }
-    const list = await search(raw);
+    const list = await search(raw, fails);
     const want = raw.replace('.', '-');
     if (/^[A-Z]{1,5}$/.test(raw)) {
       const hit = (list || []).find(h => up(h.Code) === raw && up(h.Exchange) === 'US');
@@ -419,9 +445,35 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
   };
 
 
+  // A failed lookup's reason in the words every 429 surface uses
+  // (SymbolCode.LIMIT_WORDS: the wait is counted down by the Check again
+  // beside it, not written into the sentence).
+  const failWords = (f) => {
+    const RLW = window.RateLimitWait;
+    const SC = window.SymbolCode;
+    if (f && f.limited) return (SC && SC.LIMIT_WORDS) || (RLW && RLW.REACHED) || "EODHD's per-minute request limit was reached.";
+    return RLW && RLW.failReason ? RLW.failReason(f) : 'EODHD did not answer, or the connection dropped.';
+  };
+  // The work Check again runs, by name (RateLimitWait.setBusy): its button
+  // reads "Loading…" and sends nothing more while it runs.
+  const RECHECK_BUSY = 'import-csv-check';
+
   // Generate preview
   const [checking, setChecking] = React.useState(false);
-  const generatePreview = async () => {
+  // A Check again of the rows a failed lookup left unchecked, under way.
+  const [rechecking, setRechecking] = React.useState(false);
+  const previewRunRef = React.useRef(0);
+  // Back, or a change to what a preview is made from (a column, the
+  // decimal or the date choice), ends a preview or a Check again under
+  // way: its answer is dropped. Back did not, and a Check again answering
+  // after it forced the preview step back, made from the old columns.
+  React.useEffect(() => { previewRunRef.current += 1; }, [step, mapping, decimalChoice, dateChoice]);
+  // `again`: the preview rows to look up again (Check again); every other
+  // row keeps the answer it had, and nothing is asked for it. Without it,
+  // every ticker is looked up afresh.
+  const generatePreview = async (again) => {
+    const recheck = Array.isArray(again);
+    const run = ++previewRunRef.current;
     const preview = [];
     // Each numeric column's decimal separator and the file's date order,
     // decided once from every row ("0,125" is 0.125 in a file that writes
@@ -497,9 +549,18 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
     // time; a row whose ticker the search does not know is refused here, in
     // the preview, with the reason -- not imported as a position nobody can
     // price.
-    setChecking(true);
-    resolvedRef.current = {};
-    lookedUpRef.current = {};
+    const RLW = window.RateLimitWait;
+    let busy = null;
+    if (recheck) {
+      // Only these are asked again: the import reads the same answers.
+      again.forEach(r => { delete resolvedRef.current[mapKeyOf(r)]; delete lookedUpRef.current[lookupKeyOf(r)]; });
+      setRechecking(true);
+      busy = RLW && RLW.setBusy ? RLW.setBusy(RECHECK_BUSY, 'retry') : null;
+    } else {
+      setChecking(true);
+      resolvedRef.current = {};
+      lookedUpRef.current = {};
+    }
     const distinct = [...new Map(preview.filter(r => r.valid).map(r => [mapKeyOf(r), r])).values()];
     const verdict = {};
     for (let i = 0; i < distinct.length; i += 3) {
@@ -517,6 +578,13 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
       if (v && v.found === false && window.SymbolCode && window.SymbolCode.unpriced && window.SymbolCode.unpriced(v.symbol)) {
         return { ...r, valid: false, error: `No listing found for ${r.symbol}${r.exchangeCell ? ' (' + r.exchangeCell + ')' : ''}: EODHD does not list that exchange. Add it as a Manual asset instead.` };
       }
+      // Not in the search, and the price history that tells a delisted
+      // listing (TWTR) from a typo did not load: refused as before, with the
+      // reason, and looked up again by Check again. It read "No instrument
+      // found -- check the ticker" at the limit.
+      if (v && v.found === false && v.failed) {
+        return { ...r, valid: false, recheck: true, failed: v.failed, error: `"${r.symbol}" is not in the ticker search, and its price history did not load: ${failWords(v.failed)}` };
+      }
       if (v && v.found === false) return { ...r, valid: false, error: `No instrument "${r.symbol}" found — check the ticker (or add an exchange column, e.g. VOD with LSE)` };
       if (v && v.clash && r.type !== 'split') return { ...r, valid: false, error: v.clash };
       // The unit the price is recorded in, shown before Import: GBP on a
@@ -532,7 +600,7 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
         const key = txKey(Calc.importSymbolGuess(v.symbol) || v.symbol, r.date, r.type, r.quantity, price);
         if (existingTxKeys.has(key)) return { ...r, valid: false, duplicate: true, error: 'Already in this portfolio (same symbol, date, type, quantity and price) — skipped' };
       }
-      if (v && v.found === null) return { ...r, unchecked: true };
+      if (v && v.found === null) return { ...r, unchecked: true, failed: v.failed || null, importAs: v.symbol || null };
       if (v && v.delisted) return { ...r, delisted: true, warning: `${v.symbol} is no longer listed — imported with its history, but without a current price` };
       return r;
     });
@@ -567,9 +635,25 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
       }
       history.push({ ...candidate, id: 'preview-' + i });
     }
-    setChecking(false);
+    if (recheck) {
+      if (RLW && RLW.endBusy) RLW.endBusy(RECHECK_BUSY, busy);
+      setRechecking(false);
+    } else {
+      setChecking(false);
+    }
+    // A newer preview has the last word, and one ended by Back or a
+    // column changed meanwhile has none: the step stays as it is.
+    if (run !== previewRunRef.current) return;
     setPreviewData(checked);
     setStep(3);
+  };
+  // Check again: the rows a failed lookup (the per-minute limit, EODHD's
+  // error, no connection) left unchecked or refused are looked up again, and
+  // only they. The preview is redrawn in place; nothing is imported.
+  const checkAgain = () => {
+    if (importing || rechecking) return;
+    const again = previewData.filter(r => r.unchecked || r.recheck);
+    if (again.length) generatePreview(again);
   };
 
   // Import transactions
@@ -821,6 +905,29 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
 
   const validCount = previewData.filter(p => p.valid).length;
   const invalidCount = previewData.filter(p => !p.valid).length;
+  // The rows a failed lookup stopped: imported as written (unchecked), or
+  // refused until checked again (recheck). Said once, with the reason --
+  // the limit by name -- and one Check again for them all.
+  const stopped = step === 3 ? previewData.filter(r => r.unchecked || r.recheck) : [];
+  const stopFailure = (() => {
+    const fs = stopped.map(r => r.failed).filter(Boolean);
+    return fs.find(f => f.limited) || fs[0] || null;
+  })();
+  const stopWords = (() => {
+    if (!stopped.length) return '';
+    const SC = window.SymbolCode;
+    const count = new Set(stopped.map(r => String(r.symbol || '').toUpperCase() + '|' + (r.exchange || ''))).size;
+    const n = count === 1 ? '1 ticker' : `${count} tickers`;
+    if (stopped.every(r => r.unchecked)) {
+      const head = stopFailure && stopFailure.limited && SC && SC.SEARCH_LIMIT_WORDS
+        ? SC.SEARCH_LIMIT_WORDS : `The ticker search did not load: ${failWords(stopFailure)}`;
+      return `${head} ${n} could not be checked; ${count === 1 ? 'it is' : 'they are'} imported as written.`;
+    }
+    const rest = stopped.some(r => r.unchecked)
+      ? 'Rows marked "Not checked" are imported as written; the others are not imported.'
+      : (count === 1 ? 'It is not imported.' : 'They are not imported.');
+    return `${n} could not be checked: ${failWords(stopFailure)} ${rest}`;
+  })();
 
   return (
     <div style={styles.modal} {...dialogProps}>
@@ -990,7 +1097,7 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
           )}
 
           <button
-            onClick={generatePreview}
+            onClick={() => generatePreview()}
             disabled={previewBlocked || checking}
             style={{
               ...styles.primaryButton,
@@ -1021,9 +1128,21 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
             </div>
           </div>
 
-          {previewData.some(r => r.unchecked) && (
-            <div style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 12, color: C3.warning }}>
-              Some tickers could not be checked right now (the search did not answer); they are imported as written.
+          {/* Why some tickers were not checked, and one Check again for all
+              of them: it counts the per-minute wait down and sends nothing
+              inside it (RateLimitWait.RetryButton). */}
+          {stopped.length > 0 && !importing && (
+            <div data-import-check="" style={{ marginBottom: 12 }}>
+              {window.RateLimitWait && window.RateLimitWait.FailNote
+                ? <window.RateLimitWait.FailNote failure={stopFailure} text={stopWords} label="Check again" onRetry={checkAgain}
+                    autoRetry={false} panel={RECHECK_BUSY} busyKey={RECHECK_BUSY} isDark={isDark}
+                    style={{ fontSize: 12, color: C3.warning }} />
+                : (
+                  <div style={{ fontSize: 12, lineHeight: 1.5, color: C3.warning }}>
+                    <span role="status">{stopWords}</span>
+                    <button type="button" onClick={checkAgain} disabled={rechecking} style={{ marginLeft: 8 }}>Check again</button>
+                  </div>
+                )}
             </div>
           )}
 
@@ -1061,6 +1180,13 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
                       <span style={{ ...styles.badge(row.type), marginLeft: 8 }}>
                         {row.type}
                       </span>
+                      {/* Which rows the note above means, and the listing
+                          each is imported as unless checked again. */}
+                      {row.unchecked && (
+                        <div data-import-unchecked="" style={{ ...styles.muted, fontSize: 12, marginTop: 4 }}>
+                          Not checked: imported as {row.importAs || row.symbol}
+                        </div>
+                      )}
                     </div>
                     <div style={{ textAlign: 'right' }}>
                       <div>
@@ -1108,11 +1234,11 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
 
           <button
             onClick={handleImport}
-            disabled={importing || validCount === 0}
+            disabled={importing || rechecking || validCount === 0}
             style={{
               ...styles.primaryButton,
-              opacity: (importing || validCount === 0) ? 0.5 : 1,
-              cursor: (importing || validCount === 0) ? 'not-allowed' : 'pointer'
+              opacity: (importing || rechecking || validCount === 0) ? 0.5 : 1,
+              cursor: (importing || rechecking || validCount === 0) ? 'not-allowed' : 'pointer'
             }}
           >
             {importing ? 'Importing...' : `Import ${validCount} ${validCount === 1 ? 'Transaction' : 'Transactions'}`}
