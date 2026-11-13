@@ -290,13 +290,28 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
     setLoading(false);
   };
 
+  const scoreState = window.PortfolioHealthScore.state(positions, pricesLoading);
+  // What Health scores: the stored positions less the ones held without a
+  // price, as Risk measures the priced value. The score's own line says it
+  // leaves those out, yet its diversification checks and the counts under
+  // it took them in: "8 Holdings / 2 Currencies" with VOD.LSE in both while
+  // its GBX/USD rate had failed, "Multi-currency exposure" earned by it.
+  // Positions sold to zero count as before; with no
+  // score to give (prices loading, none priced) nothing is left out.
+  const notPriced = scoreState === 'ok' && Array.isArray(positions)
+    ? positions.filter(p => p && p.priceUnavailable && Number(p.quantity) > 0) : [];
+  const notPricedIds = new Set(notPriced.map(p => p.id));
+  const scored = notPriced.length ? holdings.filter(h => !notPricedIds.has(h.id)) : holdings;
+  const notPricedNames = notPriced.length && window.PortfolioCalculations && window.PortfolioCalculations.unpricedSymbols
+    ? window.PortfolioCalculations.namesList(window.PortfolioCalculations.unpricedSymbols(positions)) : '';
+
   // Calculate portfolio health metrics
   const calculateHealthScore = () => {
     let score = 70; // Base score
     let factors = [];
 
     // Diversification bonus
-    const uniqueTypes = new Set(holdings.map(h => h.type)).size;
+    const uniqueTypes = new Set(scored.map(h => h.type)).size;
     if (uniqueTypes >= 3) {
       score += 10;
       factors.push({ text: 'Good asset diversification', positive: true });
@@ -306,7 +321,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
     }
 
     // Position concentration
-    const holdingCount = holdings.length;
+    const holdingCount = scored.length;
     if (holdingCount >= 10) {
       score += 10;
       factors.push({ text: 'Well-diversified holdings', positive: true });
@@ -316,7 +331,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
     }
 
     // Currency diversification
-    const uniqueCurrencies = new Set(holdings.map(h => h.currency)).size;
+    const uniqueCurrencies = new Set(scored.map(h => h.currency)).size;
     if (uniqueCurrencies >= 2) {
       score += 5;
       factors.push({ text: 'Multi-currency exposure', positive: true });
@@ -352,8 +367,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
   // Sectors as stored now, not as they were when the page loaded: the
   // allocation looks them up and stores them, and this stayed on "?" beside
   // a sector list.
-  const sectorCount = new Set(holdings.map(h => { try { const now = Storage.getHoldingById(h.id); return (now && now.sector) || h.sector; } catch (e) { return h.sector; } }).filter(Boolean)).size;
-  const scoreState = window.PortfolioHealthScore.state(positions, pricesLoading);
+  const sectorCount = new Set(scored.map(h => { try { const now = Storage.getHoldingById(h.id); return (now && now.sector) || h.sector; } catch (e) { return h.sector; } }).filter(Boolean)).size;
 
   // Status colours as text on this card: red "Fair" and the warnings read
   // 4.04-4.46:1 in the dark theme. Same hue, pushed to AA.
@@ -592,18 +606,18 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
             {/* Quick Stats */}
             <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 12 }}>
               <div style={styles.statCard}>
-                <div style={{ fontSize: 24, fontWeight: 700, color: acc('#f97316') }}>{holdings.length}</div>
+                <div style={{ fontSize: 24, fontWeight: 700, color: acc('#f97316') }}>{scored.length}</div>
                 <div style={styles.muted}>Holdings</div>
               </div>
               <div style={styles.statCard}>
                 <div style={{ fontSize: 24, fontWeight: 700, color: acc('#3b82f6') }}>
-                  {new Set(holdings.map(h => h.type)).size}
+                  {new Set(scored.map(h => h.type)).size}
                 </div>
                 <div style={styles.muted}>Asset Types</div>
               </div>
               <div style={styles.statCard}>
                 <div style={{ fontSize: 24, fontWeight: 700, color: C3.success }}>
-                  {new Set(holdings.map(h => h.currency)).size}
+                  {new Set(scored.map(h => h.currency)).size}
                 </div>
                 <div style={styles.muted}>Currencies</div>
               </div>
@@ -614,6 +628,13 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
                 <div style={styles.muted}>Sectors</div>
               </div>
             </div>
+            {/* The counts are of what is scored; the positions left out are
+                named as Risk names them. */}
+            {notPricedNames && (
+              <p data-health-counts-note="true" style={{ margin: '8px 0 0', fontSize: 12, lineHeight: 1.5, ...styles.muted }}>
+                Counted from the positions that have a price ({notPricedNames} not priced).
+              </p>
+            )}
 
             {/* Recommendations */}
             <div style={{
@@ -623,16 +644,16 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
             }}>
               <h4 style={{ fontWeight: 600, marginBottom: 12, marginTop: 0, fontSize: 14, color: isDark ? C3.textDark : C3.textLightTheme }}>Recommendations</h4>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8, ...styles.muted }}>
-                {holdings.length < 5 && (
+                {scored.length < 5 && (
                   <p style={{ margin: 0 }}>• Consider adding more positions for better diversification</p>
                 )}
-                {new Set(holdings.map(h => h.type)).size === 1 && (
+                {new Set(scored.map(h => h.type)).size === 1 && (
                   <p style={{ margin: 0 }}>• Add different asset types (ETFs, bonds, crypto) to reduce risk</p>
                 )}
-                {new Set(holdings.map(h => h.currency)).size === 1 && (
+                {new Set(scored.map(h => h.currency)).size === 1 && (
                   <p style={{ margin: 0 }}>• Consider international exposure for currency diversification</p>
                 )}
-                {holdings.length >= 10 && (
+                {scored.length >= 10 && (
                   <p style={{ margin: 0 }}>• Good diversification! Review periodically for rebalancing opportunities</p>
                 )}
               </div>

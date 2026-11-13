@@ -24,8 +24,12 @@ window.EditPositionModal = ({ holding, holdingData, baseCurrency, onClose, onSav
   (window.useEscLayer || (() => {}))(askDelete, cancelDelete);
   const deleteLabel = holding.type === 'manual' ? holding.name : (holding.symbol?.split('.')[0] || 'this position');
   const doDelete = () => {
-    deletedOrderRef.current = window.PTEditOrder ? window.PTEditOrder() : [];
-    Storage.deleteHolding(holding.id);
+    const order = window.PTEditOrder ? window.PTEditOrder() : [];
+    // A write the browser refused keeps the window, the question and the
+    // position, and says why under it: it closed in silence and the
+    // position stayed.
+    if (!Storage.attempt(() => Storage.deleteHolding(holding.id), (m) => say('delete', m))) return;
+    deletedOrderRef.current = order;
     if (window.MIAnalytics) window.MIAnalytics.track('dl_mi_portfolio_manage', { action: 'delete' });
     window.Haptics?.medium?.();
     onSave?.();
@@ -770,6 +774,7 @@ window.EditPositionModal = ({ holding, holdingData, baseCurrency, onClose, onSav
             <button type="button" autoFocus onClick={cancelDelete} style={{ padding: '8px 14px', borderRadius: 10, border: `1px solid ${isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.2)'}`, background: 'transparent', color: 'inherit', cursor: 'pointer', fontWeight: 600 }}>Cancel</button>
             <button type="button" onClick={doDelete} style={{ padding: '8px 14px', borderRadius: 10, border: 'none', background: '#dc2626', color: '#ffffff', cursor: 'pointer', fontWeight: 600 }}>Delete</button>
           </div>
+          {noteFor('delete')}
         </fieldset>
       ) : (
       <button

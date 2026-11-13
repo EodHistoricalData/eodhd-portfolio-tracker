@@ -1237,6 +1237,22 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   const pricePnL = Calc.getTotalPricePnL(holdingsWithData);
   const currencyPnL = Calc.getTotalCurrencyPnL(holdingsWithData);
   const currencyAllocation = Calc.getAllocationByCurrency(holdingsWithData);
+  // A card worked out on the priced positions while others have none names
+  // them, by ticker and why, with the prices' Try again: the words and the
+  // button of Allocation (PortfolioAnalytics, leftOutLine). Currency
+  // Exposure in the Mini App read "GBP 52.9% / USD 45.9% / GBX 1.1%" over
+  // an NPN.JSE without a price, and went without a word when one currency
+  // was left. Kept through the Try again it offers, so
+  // the button reads "Loading…" where it was pressed. `tail`: what the card
+  // does without them.
+  const leftOutText = (loading && !retrying) || noneValued ? '' : Calc.unpricedLine(holdingsWithData, activePortfolio?.baseCurrency || 'USD');
+  const PNL_LEFT_OUT = 'Unrealized, Price and Currency P&L leave out the positions without a value.';
+  const leftOutLine = (tail, style) => (leftOutText ? (
+    <p data-unpriced-why="true" style={{ margin: '0 0 12px', fontSize: 12, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight, ...style }}>
+      <span role="status">{leftOutText}{tail ? ' ' + tail : ''}</span>
+      <RLW.RetryButton busyKey="prices" isDark={isDark} onClick={retryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />
+    </p>
+  ) : null);
 
   const positionsCounterText = positionsLimit && activePortfolioId && activePortfolioId !== 'all' && window.FreeLimitWalls
     ? window.FreeLimitWalls.positionsCounter(holdings.length, positionsLimit) : null;
@@ -1282,7 +1298,9 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
         : 'It has no positions. This cannot be undone.',
       confirmLabel: 'Delete',
       onConfirm: () => {
-        Storage.deletePortfolio(id);
+        let refused = null;
+        Storage.attempt(() => Storage.deletePortfolio(id), (m) => { refused = m; });
+        if (refused) return refused;
         loadData();
         if (activePortfolioId === id) {
           const remaining = Storage.getPortfolios();
@@ -1369,8 +1387,12 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
       text: 'All transactions for this position are deleted too. This cannot be undone.',
       confirmLabel: 'Delete',
       onConfirm: () => {
+        // A refused write: the question stays with why (the dialog shows
+        // what this returns), and the position with it.
+        let refused = null;
+        Storage.attempt(() => Storage.deleteHolding(holdingId), (m) => { refused = m; });
+        if (refused) return refused;
         if (window.MIAnalytics) window.MIAnalytics.track('dl_mi_portfolio_manage', { action: 'delete' });
-        Storage.deleteHolding(holdingId);
         const portfolioHoldings = Storage.getHoldingsByPortfolio(activePortfolioId);
         setHoldings(portfolioHoldings);
         loadHoldingsPrices(portfolioHoldings);
@@ -1390,9 +1412,18 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
         style={{ ...styles.modalContent, background: isDark ? '#15140F' : '#ffffff', backdropFilter: 'none', WebkitBackdropFilter: 'none', color: isDark ? C3.textDark : C3.textLightTheme, boxSizing: 'border-box' }}>
         <h3 style={{ fontSize: 18, fontWeight: 700, margin: '0 0 10px' }}>{confirmAsk.title}</h3>
         <p style={{ fontSize: 14, lineHeight: 1.5, margin: '0 0 20px', color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{confirmAsk.text}</p>
+        {/* A delete the browser's storage refused: the question stays, with
+            why under it (onConfirm returned the words). */}
+        {confirmAsk.note && <p role="alert" data-pt-confirm-note="true" style={{ fontSize: 13, lineHeight: 1.5, margin: '-8px 0 16px', color: isDark ? C3.error : (C3.errorLight || '#c81e2c') }}>{confirmAsk.note}</p>}
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
           {!confirmAsk.infoOnly && <button type="button" onClick={() => setConfirmAsk(null)} style={{ ...styles.button, background: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', color: isDark ? C3.textDark : C3.textLightTheme }}>Cancel</button>}
-          <button type="button" onClick={() => { const ask = confirmAsk; confirmDoneRef.current = !ask.infoOnly; ask.onConfirm(); setConfirmAsk(null); }} style={{ ...styles.button, background: confirmAsk.infoOnly ? '#c2410c' : '#dc2626', color: '#ffffff' }}>{confirmAsk.confirmLabel || 'OK'}</button>
+          <button type="button" onClick={() => {
+            const ask = confirmAsk;
+            confirmDoneRef.current = !ask.infoOnly;
+            const refused = ask.onConfirm();
+            if (typeof refused === 'string' && refused) { confirmDoneRef.current = false; setConfirmAsk({ ...ask, note: refused }); return; }
+            setConfirmAsk(null);
+          }} style={{ ...styles.button, background: confirmAsk.infoOnly ? '#c2410c' : '#dc2626', color: '#ffffff' }}>{confirmAsk.confirmLabel || 'OK'}</button>
         </div>
       </window.PTDialog.Frame>
     </div>
@@ -1788,6 +1819,9 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
           {overviewWidgets.includes('pnl') && holdings.length > 0 && (
             <div style={{ marginTop: 16, background: 'rgba(255,255,255,0.02)', border: `1px solid ${bd}`, borderRadius: 4, padding: '16px 20px' }}>
               <h3 style={{ fontWeight: 700, fontSize: 14, margin: '0 0 12px', color: tc }}>P&L Breakdown</h3>
+              {/* Unrealized, Price and Currency P&L are of the priced
+                  positions: the ones left out are named. */}
+              {leftOutLine(PNL_LEFT_OUT)}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 12, fontSize: 13 }}>
                 {[
                   { label: 'Unrealized', value: unrealizedPnL, color: signColor(unrealizedPnL), needsPrice: true },
@@ -1889,6 +1923,8 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                   <div style={{ fontSize: 12, lineHeight: 1.6, color: ink(0.7) }}>{window.renderMarkdown ? window.renderMarkdown(autoInsights) : autoInsights}</div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {/* Weighed on the priced value: what it leaves out is named. */}
+                    {leftOutLine('The checks leave out the positions without a value.', { margin: 0 })}
                     {/* Generated alerts from data */}
                     {holdingsWithData.filter(h => h.symbol).length > 0 && (() => {
                       const alerts = [];
@@ -1938,6 +1974,8 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                   <div style={{ color: ink(0.3), fontSize: 13, padding: 16, textAlign: 'center' }}>Add positions to see the allocation</div>
                 ) : (
                   <div>
+                    {/* Current % is of the priced value: what it leaves out is named. */}
+                    {leftOutLine('The percentages are of the value that has a price.')}
                     {/* Simple allocation table with suggested changes */}
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                       <thead>
@@ -2465,7 +2503,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
         </div>
 
         {/* P&L Breakdown */}
-        {!loading && holdings.length > 0 && (
+        {(!loading || retrying) && holdings.length > 0 && (
           <div style={styles.card}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
               <h2 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>P&L Breakdown</h2>
@@ -2476,6 +2514,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                 View History
               </button>
             </div>
+            {leftOutLine(PNL_LEFT_OUT)}
             <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 12, fontSize: 14 }}>
               {[
                 { label: 'Unrealized', value: unrealizedPnL, color: signColor(unrealizedPnL), needsPrice: true },
@@ -2540,9 +2579,12 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
         )}
 
         {/* Currency Allocation */}
-        {!loading && currencyAllocation.length > 1 && (
+        {/* With a position left out it stays, one currency or more, and says
+            which (leftOutLine): with one currency left it went in silence. */}
+        {(!loading || retrying) && (currencyAllocation.length > 1 || (currencyAllocation.length > 0 && leftOutText)) && (
           <div style={styles.card}>
             <h2 style={{ fontSize: 14, fontWeight: 600, margin: 0, marginBottom: 12 }}>Currency Exposure</h2>
+            {leftOutLine('The percentages are of the value that has a price.')}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {currencyAllocation.map(({ currency, value, percent }) => (
                 <div key={currency} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>

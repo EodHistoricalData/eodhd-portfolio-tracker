@@ -62,6 +62,15 @@ const STORAGE_FULL_MESSAGE = "Your browser's storage for this site is full — n
 // prices…" for ever, and Add Position said "This portfolio was deleted".
 const BLOCKED_MESSAGE = 'This browser blocks site storage, so portfolios cannot be kept here. Allow storage for this site or use another browser.';
 let blockedProbe = null;
+// Why the last write failed: what localStorage.setItem threw, or null. A
+// browser that lets the page read its storage but not write it (setItem
+// throws SecurityError) was told its storage was full, and a Delete
+// Position closed in silence with the position kept.
+let lastWriteError = null;
+// Over the quota, in every browser's words: QuotaExceededError (code 22),
+// Firefox's NS_ERROR_DOM_QUOTA_REACHED (code 1014).
+const isQuotaError = (e) => Boolean(e) && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+  || e.code === 22 || e.code === 1014);
 
 window.PortfolioStorage = {
   StorageError: PortfolioStorageError,
@@ -104,6 +113,15 @@ window.PortfolioStorage = {
   _refuseBlocked() {
     if (this.storageBlocked()) throw new PortfolioStorageError('blocked', BLOCKED_MESSAGE);
   },
+  // The refusal of a write that failed (a save that returned false): 'full'
+  // when the browser said its quota was reached, 'blocked' when it refused
+  // the write for any other reason. Taken once: the next failure says its own.
+  _writeRefused() {
+    const e = lastWriteError;
+    lastWriteError = null;
+    if (e && !isQuotaError(e)) return new PortfolioStorageError('blocked', BLOCKED_MESSAGE);
+    return new PortfolioStorageError('full', STORAGE_FULL_MESSAGE);
+  },
   // Storage keys
   KEYS: {
     PORTFOLIOS: 'eodhd_pt_portfolios',
@@ -140,11 +158,13 @@ window.PortfolioStorage = {
 
   savePortfolios(portfolios) {
     this._refuseUnreadable(this.KEYS.PORTFOLIOS);
+    lastWriteError = null;
     try {
       localStorage.setItem(this.KEYS.PORTFOLIOS, JSON.stringify(portfolios));
       window.DataSync?.pushSection('pt_portfolios', portfolios);
       return true;
     } catch (e) {
+      lastWriteError = e;
       console.error('Error saving portfolios:', e);
       return false;
     }
@@ -167,7 +187,7 @@ window.PortfolioStorage = {
     this._freeLimit('portfolios', () => portfolios.length + 1);
     portfolios.push(portfolio);
     // A full storage is said, not passed off as saved.
-    if (!this.savePortfolios(portfolios)) throw new PortfolioStorageError('full', STORAGE_FULL_MESSAGE);
+    if (!this.savePortfolios(portfolios)) throw this._writeRefused();
     return portfolio;
   },
 
@@ -202,14 +222,45 @@ window.PortfolioStorage = {
     // A portfolio the repair made becomes the user's once they name it.
     if (next.recovered && typeof updates.name === 'string' && updates.name !== portfolios[index].name) delete next.recovered;
     portfolios[index] = next;
-    if (!this.savePortfolios(portfolios)) throw new PortfolioStorageError('full', STORAGE_FULL_MESSAGE);
+    if (!this.savePortfolios(portfolios)) throw this._writeRefused();
     return portfolios[index];
   },
 
+  // The lists a delete writes, as they were before it: put back when a later
+  // write of the same delete is refused, so a refused delete leaves nothing
+  // half done (a portfolio gone with its positions kept).
+  _listsBefore() {
+    const out = {};
+    [this.KEYS.PORTFOLIOS, this.KEYS.HOLDINGS, this.KEYS.TRANSACTIONS].forEach((k) => {
+      try { out[k] = localStorage.getItem(k); } catch (e) { out[k] = undefined; }
+    });
+    return out;
+  },
+  // Only the lists this delete wrote (`written`): putting back all three
+  // rewrote, and pushed, a list it never touched -- a portfolio another tab
+  // added meanwhile was erased. The account is told
+  // too, as the write that went through was pushed (DataSync, debounced):
+  // only a list that reads as one, never a stand-in -- an unreadable one
+  // went out as [] and emptied the account's.
+  _putBack(before, written) {
+    const sections = { [this.KEYS.PORTFOLIOS]: 'pt_portfolios', [this.KEYS.HOLDINGS]: 'pt_holdings', [this.KEYS.TRANSACTIONS]: 'pt_transactions' };
+    (written || []).forEach((k) => {
+      const v = before[k];
+      if (v === undefined || !sections[k]) return;
+      try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { return; }
+      let list = null;
+      try { list = v == null ? null : JSON.parse(v); } catch (e) { list = null; }
+      if (Array.isArray(list)) window.DataSync?.pushSection(sections[k], list);
+    });
+  },
+
+  // A refused write is said (_writeRefused) and nothing is deleted. It
+  // returned true whatever the writes did.
   deletePortfolio(id) {
+    const before = this._listsBefore();
     const portfolios = this.getPortfolios();
     const filtered = portfolios.filter(p => p.id !== id);
-    this.savePortfolios(filtered);
+    if (!this.savePortfolios(filtered)) throw this._writeRefused();
 
     // Also delete related holdings and transactions. The ids have to be read
     // before the holdings are saved without them: this used to save first and
@@ -220,12 +271,24 @@ window.PortfolioStorage = {
       .filter(h => h.portfolioId === id)
       .map(h => h.id);
 
-    const holdings = this.getHoldings().filter(h => h.portfolioId !== id);
-    this.saveHoldings(holdings);
-
-    const transactions = this.getTransactions()
-      .filter(t => !holdingIds.includes(t.holdingId));
-    this.saveTransactions(transactions);
+    // Each list written only when it changes, as deleteHolding; the ones
+    // written are put back when a later one is refused.
+    const written = [this.KEYS.PORTFOLIOS];
+    const allHoldings = this.getHoldings();
+    const holdings = allHoldings.filter(h => h.portfolioId !== id);
+    const allTransactions = this.getTransactions();
+    const transactions = allTransactions.filter(t => !holdingIds.includes(t.holdingId));
+    let stopped = false;
+    if (holdings.length !== allHoldings.length) {
+      if (this.saveHoldings(holdings)) written.push(this.KEYS.HOLDINGS);
+      else stopped = true;
+    }
+    if (!stopped && transactions.length !== allTransactions.length && !this.saveTransactions(transactions)) stopped = true;
+    if (stopped) {
+      const refused = this._writeRefused();
+      this._putBack(before, written);
+      throw refused;
+    }
 
     return true;
   },
@@ -256,11 +319,13 @@ window.PortfolioStorage = {
 
   saveHoldings(holdings) {
     this._refuseUnreadable(this.KEYS.HOLDINGS);
+    lastWriteError = null;
     try {
       localStorage.setItem(this.KEYS.HOLDINGS, JSON.stringify(holdings));
       window.DataSync?.pushSection('pt_holdings', holdings);
       return true;
     } catch (e) {
+      lastWriteError = e;
       console.error('Error saving holdings:', e);
       return false;
     }
@@ -313,7 +378,7 @@ window.PortfolioStorage = {
 
     const holdings = this.getHoldings();
     holdings.push(holding);
-    if (!this.saveHoldings(holdings)) throw new PortfolioStorageError('full', STORAGE_FULL_MESSAGE);
+    if (!this.saveHoldings(holdings)) throw this._writeRefused();
     return holding;
   },
 
@@ -324,18 +389,29 @@ window.PortfolioStorage = {
     if (index === -1) throw new PortfolioStorageError('gone', HOLDING_GONE_MESSAGE);
 
     holdings[index] = { ...holdings[index], ...updates };
-    if (!this.saveHoldings(holdings)) throw new PortfolioStorageError('full', STORAGE_FULL_MESSAGE);
+    if (!this.saveHoldings(holdings)) throw this._writeRefused();
     return holdings[index];
   },
 
+  // A refused write is said and the position stays, its trades with it: Edit
+  // -> Delete Position closed in silence over a write the browser refused,
+  // and the position was still there after a reload.
   deleteHolding(id) {
+    const before = this._listsBefore();
     const holdings = this.getHoldings();
     const filtered = holdings.filter(h => h.id !== id);
-    this.saveHoldings(filtered);
+    if (!this.saveHoldings(filtered)) throw this._writeRefused();
 
-    // Also delete related transactions
-    const transactions = this.getTransactions().filter(t => t.holdingId !== id);
-    this.saveTransactions(transactions);
+    // Also delete related transactions. Written only when there are some: a
+    // position just made and taken back (a refused import) has none, and
+    // rewriting the list unchanged could only fail it.
+    const all = this.getTransactions();
+    const transactions = all.filter(t => t.holdingId !== id);
+    if (transactions.length !== all.length && !this.saveTransactions(transactions)) {
+      const refused = this._writeRefused();
+      this._putBack(before, [this.KEYS.HOLDINGS]);
+      throw refused;
+    }
     return true;
   },
 
@@ -358,11 +434,13 @@ window.PortfolioStorage = {
 
   saveTransactions(transactions) {
     this._refuseUnreadable(this.KEYS.TRANSACTIONS);
+    lastWriteError = null;
     try {
       localStorage.setItem(this.KEYS.TRANSACTIONS, JSON.stringify(transactions));
       window.DataSync?.pushSection('pt_transactions', transactions);
       return true;
     } catch (e) {
+      lastWriteError = e;
       console.error('Error saving transactions:', e);
       return false;
     }
@@ -401,7 +479,7 @@ window.PortfolioStorage = {
 
     const transactions = this.getTransactions();
     transactions.push(transaction);
-    if (!this.saveTransactions(transactions)) throw new PortfolioStorageError('full', STORAGE_FULL_MESSAGE);
+    if (!this.saveTransactions(transactions)) throw this._writeRefused();
     return transaction;
   },
 
@@ -433,7 +511,7 @@ window.PortfolioStorage = {
       createdAt: this.getTimestamp()
     }));
     if (!made.length) return made;
-    if (!this.saveTransactions(this.getTransactions().concat(made))) throw new PortfolioStorageError('full', STORAGE_FULL_MESSAGE);
+    if (!this.saveTransactions(this.getTransactions().concat(made))) throw this._writeRefused();
     return made;
   },
 
@@ -459,14 +537,14 @@ window.PortfolioStorage = {
     if (target && !this.getHoldingById(target)) throw new PortfolioStorageError('gone', HOLDING_GONE_MESSAGE);
 
     transactions[index] = { ...transactions[index], ...updates };
-    if (!this.saveTransactions(transactions)) throw new PortfolioStorageError('full', STORAGE_FULL_MESSAGE);
+    if (!this.saveTransactions(transactions)) throw this._writeRefused();
     return transactions[index];
   },
 
   deleteTransaction(id) {
     const transactions = this.getTransactions();
     const filtered = transactions.filter(t => t.id !== id);
-    this.saveTransactions(filtered);
+    if (!this.saveTransactions(filtered)) throw this._writeRefused();
     return true;
   },
 
@@ -498,11 +576,13 @@ window.PortfolioStorage = {
   },
 
   saveSettings(settings) {
+    lastWriteError = null;
     try {
       localStorage.setItem(this.KEYS.SETTINGS, JSON.stringify(settings));
       window.DataSync?.pushSection('pt_settings', settings);
       return true;
     } catch (e) {
+      lastWriteError = e;
       console.error('Error saving settings:', e);
       return false;
     }
@@ -1104,7 +1184,7 @@ window.PortfolioStorage = {
     if (!ok) {
       // Put back what was there; a half-restored set is worse than none.
       Object.entries(before.keys).forEach(([k, v]) => { try { localStorage.setItem(k, v); } catch (e) { /* nothing more to do */ } });
-      throw new PortfolioStorageError('full', STORAGE_FULL_MESSAGE);
+      throw this._writeRefused();
     }
     return { portfolios: portfolios.length, holdings: holdings.length, transactions: transactions.length };
   },

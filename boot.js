@@ -17,6 +17,9 @@ window.APP_META = {
     "eodhd_ai_insights_board",
     "eodhd_ai_chat",
     "eodhd_timezone_manual"
+  ],
+  "ownFailures": [
+    "getBatchRealTime"
   ]
 };
 

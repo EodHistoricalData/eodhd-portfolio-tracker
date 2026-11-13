@@ -193,7 +193,10 @@ window.TransactionHistoryView = ({ holding, portfolioId, baseCurrency, onClose, 
       },
     });
     if (!go) return;
-    Storage.deleteTransaction(txId);
+    // A write the browser refused leaves the row, with why under it (every delete went on as if done).
+    let refused = null;
+    Storage.attempt(() => Storage.deleteTransaction(txId), (m) => { refused = m; });
+    if (refused) { setRowNote({ id: txId, text: refused }); return; }
     loadTransactions();
     if (onUpdate) onUpdate();
   };
