@@ -347,7 +347,7 @@ window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, to
       ) : (
         <div style={{ padding: 16 }}>
           {loadFail && (
-            <RLW.FailNote panel="macro" ownFocus
+            <RLW.FailNote panel="macro" ownFail="macro" ownFocus
               what={loadFail.count >= loadFail.of ? 'The economic data' : `${loadFail.count} of ${loadFail.of} figures`}
               failure={loadFail} onRetry={retryMacro} isDark={isDark}
               style={{ marginBottom: 16, padding: '10px 12px', borderRadius: 12, border: `1px solid ${isDark ? C3.lineDark : C3.lineLight}`, background: isDark ? C3.fillDark : C3.fillLight }}
@@ -387,7 +387,7 @@ window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, to
                 return is of the valued ones, and says why the rest are not
                 in it, with Try again. */}
             {Number.isFinite(totalReturn) && (pricesLeftOut || pricesWhy) && (
-              <div data-unpriced-why="true" style={{ marginTop: 8, fontSize: 12, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+              <div data-unpriced-why="true" data-own-fail="quotes" style={{ marginTop: 8, fontSize: 12, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
                 <span role="status">{pricesLeftOut || pricesWhy} The return leaves out the positions without a value.</span>
                 {onRetryPrices && (
                   <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />

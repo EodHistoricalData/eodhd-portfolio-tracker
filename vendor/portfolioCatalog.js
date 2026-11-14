@@ -480,7 +480,10 @@ window.PortfolioCatalogView = ({ apiKey, theme, onAdopt, onClose, onOpenPortfoli
         React.createElement('span', { style: { color: _tm }, title: 'Illustrative long-run range per year, set by hand for this template. Not a backtest and not a forecast.' }, 'Illustrative return: ', React.createElement('span', { style: { color: _ink('#22c55e'), fontWeight: 600 } }, t.returnRange + ' / yr')),
         React.createElement('span', { style: { color: _tm } }, 'Age: ', React.createElement('span', { style: { color: _ink('#f97316'), fontWeight: 600 } }, t.targetAge)),
         // "Holdings: 41" over a table of 25 rows read as rows missing: the count says which part of the fund is listed.
-        React.createElement('span', { style: { color: _tm } }, 'Holdings: ', React.createElement('span', { style: { fontWeight: 600 } },
+        // A fund's count is printed once its list has come: "Holdings: 0"
+        // while it loaded, or after it failed at the limit, read as an empty
+        // fund. The line under the header says why.
+        (t.category !== 'fund' || t._holdingsState === 'ready') && React.createElement('span', { style: { color: _tm } }, 'Holdings: ', React.createElement('span', { style: { fontWeight: 600 } },
           t.omittedHoldings > 0
             ? `top ${t.tickers?.length || 0} of ${t.feedCapped ? 'the ' + t.totalHoldings + ' largest' : t.totalHoldings}`
             : (t.feedCapped ? `the ${t.totalHoldings} largest` : (t.totalHoldings ?? (t.tickers?.length || 0))))),

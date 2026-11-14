@@ -222,7 +222,10 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
   // nothing about the ticker, unlike an empty answer. What it threw goes
   // into `fails`: the preview says why (the per-minute limit, EODHD's error)
   // -- "the search did not answer" was all it said at the limit.
-  const search = async (q, fails) => {
+  // `alive`: false once the preview that asked is left (Back, closed, a
+  // column changed): nothing more is sent for it (stillAsked, below).
+  const search = async (q, fails, alive) => {
+    if (alive && !alive()) return null;
     try {
       const hits = await window.EODHD_API.searchStocks(apiKey, q, { throwErrors: true });
       return Array.isArray(hits) ? hits : [];
@@ -258,8 +261,9 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
   // around the trade's date, only for a ticker the search did not find.
   // A failure goes into `fails` (as the search's): a history the limit cut
   // off says nothing about the ticker, and the preview says so.
-  const tradedOnce = async (symbol, date, fails) => {
+  const tradedOnce = async (symbol, date, fails, alive) => {
     if (!window.EODHD_API || !window.EODHD_API.getHistoricalData || !/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) return false;
+    if (alive && !alive()) return false;
     const day = Date.parse(date + 'T00:00:00Z');
     const iso = (t) => new Date(t).toISOString().slice(0, 10);
     try {
@@ -272,8 +276,9 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
   // preview called them "no longer listed" and they came in priced.
   // A real-time close, else a close in the last ten
   // days, is a live listing.
-  const pricedNow = async (symbol, fails) => {
+  const pricedNow = async (symbol, fails, alive) => {
     const priced = (q) => { const c = q && parseFloat(q.close); return Number.isFinite(c) && c > 0; };
+    if (alive && !alive()) return false;
     try {
       if (priced(await window.EODHD_API.getRealTimeData(apiKey, symbol, { throwErrors: true }))) return true;
     } catch (e) {
@@ -283,6 +288,7 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
       if (priced(last)) return true;
       if (fails) fails.push(e); /* asked the end of day instead */
     }
+    if (alive && !alive()) return false;
     try {
       const iso = (t) => new Date(t).toISOString().slice(0, 10);
       const rows = await window.EODHD_API.getHistoricalData(apiKey, symbol, iso(Date.now() - 10 * 86400000), iso(Date.now()), undefined, { throwErrors: true });
@@ -310,14 +316,21 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
   // for VOD.LSE searched VOD.LSE three times.
   // The two price checks of one lookup, each keeping what failed in that
   // lookup's own `fails` (lookups run three at a time).
-  const checksInto = (fails) => ({
-    pricedNow: (symbol) => pricedNow(symbol, fails),
-    tradedOnce: (symbol, date) => tradedOnce(symbol, date, fails),
+  const checksInto = (fails, alive) => ({
+    pricedNow: (symbol) => pricedNow(symbol, fails, alive),
+    tradedOnce: (symbol, date) => tradedOnce(symbol, date, fails, alive),
   });
-  const lookupSymbol = async (row) => {
+  // `alive` (stillAsked): checked before every request after the first. A
+  // look-up the preview no longer waits for -- Back or Close during the
+  // check after a 429 wait, the search then answering [] -- went on to the
+  // price and the history, spending the person's quota for nothing.
+  // Such a look-up comes back `aborted`, and is
+  // not kept as an answer.
+  const lookupSymbol = async (row, alive) => {
     const fails = [];
-    const { pricedNow, tradedOnce } = checksInto(fails);
-    let r = await resolveSymbolRaw(row, fails);
+    const { pricedNow, tradedOnce } = checksInto(fails, alive);
+    let r = await resolveSymbolRaw(row, fails, alive);
+    if (alive && !alive()) return { ...r, aborted: true };
     // A price today first: it does not depend on the history request, which
     // a plan or a limit can refuse. Then history around the
     // trade, for a listing that is gone.
@@ -334,6 +347,7 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
       const searchSaid = !!(SC && SC.searched && SC.searched(r.symbol));
       if (!searchSaid && await pricedNow(r.symbol)) r = { ...r, found: true };
       else if (await tradedOnce(r.symbol, row.date)) r = { ...r, found: true, delisted: true };
+      if (alive && !alive()) return { ...r, aborted: true };
     }
     // Why a check could not be made -- the per-minute limit, EODHD's error,
     // no connection, an answer that could not be read (RateLimitWait.outage)
@@ -348,10 +362,12 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
   };
   const lookupKeyOf = (row) => up(row.symbol) + '|' + (row.exchange || '') + '|' + (row.fileCurrency || '');
   const lookedUpRef = React.useRef({});
-  const resolveSymbol = async (row) => {
+  const resolveSymbol = async (row, alive) => {
     const lk = lookupKeyOf(row);
-    if (!lookedUpRef.current[lk]) lookedUpRef.current[lk] = lookupSymbol(row);
-    const r = await lookedUpRef.current[lk];
+    if (!lookedUpRef.current[lk]) lookedUpRef.current[lk] = lookupSymbol(row, alive);
+    const asked = lookedUpRef.current[lk];
+    const r = await asked;
+    if (r.aborted && lookedUpRef.current[lk] === asked) delete lookedUpRef.current[lk];
     // The unit a price is recorded in: the file's GBP on a listing quoted in
     // pence is converted to pence (Calc.importPriceUnit).
     // r.currency is the listing's own, or the held
@@ -367,7 +383,7 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
     const clash = r.index ? null : Calc.importCurrencyClash(row.currencyCell, r.currency, r.symbol, r.held);
     return { ...r, currency, unit, noCurrency, clash, type: typeOf(r.symbol, r.hit) };
   };
-  const resolveSymbolRaw = async (row, fails) => {
+  const resolveSymbolRaw = async (row, fails, alive) => {
     let raw = up(row.symbol).trim();
     const own = heldListing(raw, row.exchange);
     if (own) return { symbol: own.symbol, currency: own.holding.currency || exchangeCurrency(own.symbol.split('.').pop()) || null, found: true, hit: null, held: true };
@@ -404,7 +420,7 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
         if (d > 0 && SC.YAHOO[raw.slice(d + 1)] === exch) raw = raw.slice(0, d);
       }
       const code = raw.replace('.', '-');
-      const hits = await search(`${code}.${exch}`, fails);
+      const hits = await search(`${code}.${exch}`, fails, alive);
       const hit = (hits || []).find(h => up(h.Code) === code && up(h.Exchange) === exch);
       return { symbol: `${code}.${exch}`, currency: (hit && hit.Currency) || exchangeCurrency(exch), found: hits == null ? null : !!hit, hit };
     }
@@ -413,11 +429,11 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
     // BTC-USD-CC.US.
     const pair = raw.match(/^(.+)\.(CC|FOREX)$/);
     if (pair) {
-      const hits = await search(pair[1], fails);
+      const hits = await search(pair[1], fails, alive);
       const hit = (hits || []).find(h => up(h.Code) === pair[1] && up(h.Exchange) === pair[2]);
       return { symbol: raw, currency: Calc.importPairCurrency(raw) || 'USD', found: hits == null ? null : !!hit, hit };
     }
-    const list = await search(raw, fails);
+    const list = await search(raw, fails, alive);
     const want = raw.replace('.', '-');
     if (/^[A-Z]{1,5}$/.test(raw)) {
       const hit = (list || []).find(h => up(h.Code) === raw && up(h.Exchange) === 'US');
@@ -437,10 +453,18 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
 
   // One lookup per ticker and exchange, shared by the preview and the import.
   const resolvedRef = React.useRef({});
+  // The check's line (stopWords) is worded when drawn, and points to a
+  // host's panel that says a refused key: drawn again when that changes.
+  window.RateLimitWait.useHostPanel();
   const mapKeyOf = (row) => up(row.symbol) + '|' + (row.exchange || '') + '|' + (row.fileCurrency || '') + '|' + (row.currencyCell || '');
-  const resolveCached = (row) => {
+  // `alive`: as lookupSymbol's; an aborted answer is dropped from here too.
+  const resolveCached = (row, alive) => {
     const k = mapKeyOf(row);
-    if (!resolvedRef.current[k]) resolvedRef.current[k] = resolveSymbol(row);
+    if (!resolvedRef.current[k]) {
+      const p = resolveSymbol(row, alive);
+      resolvedRef.current[k] = p;
+      p.then((r) => { if (r && r.aborted && resolvedRef.current[k] === p) delete resolvedRef.current[k]; }, () => {});
+    }
     return resolvedRef.current[k];
   };
 
@@ -468,12 +492,20 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
   // way: its answer is dropped. Back did not, and a Check again answering
   // after it forced the preview step back, made from the old columns.
   React.useEffect(() => { previewRunRef.current += 1; }, [step, mapping, decimalChoice, dateChoice]);
+  // Closed, or gone with the portfolio page: the same.
+  React.useEffect(() => () => { previewRunRef.current += 1; }, []);
+  // The one look-up made by itself once the limit's wait is over, per
+  // preview (autoRecheck, below).
+  const autoRecheckLeftRef = React.useRef(1);
   // `again`: the preview rows to look up again (Check again); every other
   // row keeps the answer it had, and nothing is asked for it. Without it,
   // every ticker is looked up afresh.
   const generatePreview = async (again) => {
     const recheck = Array.isArray(again);
     const run = ++previewRunRef.current;
+    // This preview is still the one on screen: its look-ups ask nothing more
+    // once it is not (Back, Close, a column changed).
+    const stillAsked = () => run === previewRunRef.current;
     const preview = [];
     // Each numeric column's decimal separator and the file's date order,
     // decided once from every row ("0,125" is 0.125 in a file that writes
@@ -560,12 +592,16 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
       setChecking(true);
       resolvedRef.current = {};
       lookedUpRef.current = {};
+      autoRecheckLeftRef.current = 1;
     }
     const distinct = [...new Map(preview.filter(r => r.valid).map(r => [mapKeyOf(r), r])).values()];
     const verdict = {};
     for (let i = 0; i < distinct.length; i += 3) {
+      // Left (Back, a column changed, the window closed): the tickers not yet
+      // asked for are not asked.
+      if (!stillAsked()) break;
       const chunk = distinct.slice(i, i + 3);
-      const answers = await Promise.all(chunk.map(r => resolveCached(r).catch(() => ({ found: null }))));
+      const answers = await Promise.all(chunk.map(r => resolveCached(r, stillAsked).catch(() => ({ found: null }))));
       chunk.forEach((r, j) => { verdict[mapKeyOf(r)] = answers[j]; });
     }
     const checked = preview.map(r => {
@@ -847,33 +883,39 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
       limitLine = W.importLine(pendingTx.length, total, max);
     }
 
-    // Write: the new holdings, then every transaction at once. A failure
-    // removes the holdings this import made, so nothing half-done is left.
+    // Write: the new holdings in one write, then every transaction at once.
+    // A failure takes back the holdings this import made, so nothing
+    // half-done is left -- and when the browser refuses that too, the line
+    // says they stay, and the portfolio shows them (it
+    // said "Nothing was imported" over positions a reload then showed).
     const made = [];
     let imported = 0;
     try {
       if (pendingTx.length && !Storage.getPortfolios().some(p => p.id === portfolioId)) {
         throw new Storage.StorageError('portfolio-gone', 'This portfolio was deleted (perhaps in another tab). Reload the page and pick a portfolio.');
       }
+      const toMake = [];
       pendingTx.forEach(p => {
-        if (p.holding.pending && !p.holding.created) {
-          p.holding.created = Storage.createHolding({
-            portfolioId,
-            type: p.holding.type,
-            symbol: p.holding.symbol,
-            name: p.holding.name || p.holding.symbol.split('.')[0],
-            currency: p.holding.currency
-          });
-          made.push(p.holding.created.id);
-        }
+        if (p.holding.pending && !p.holding.created && toMake.indexOf(p.holding) === -1) toMake.push(p.holding);
       });
+      const records = Storage.createHoldings ? Storage.createHoldings(toMake.map(h => ({
+        portfolioId,
+        type: h.type,
+        symbol: h.symbol,
+        name: h.name || h.symbol.split('.')[0],
+        currency: h.currency
+      }))) : toMake.map(h => Storage.createHolding({ portfolioId, type: h.type, symbol: h.symbol, name: h.name || h.symbol.split('.')[0], currency: h.currency }));
+      toMake.forEach((h, i) => { h.created = records[i]; made.push(records[i].id); });
       Storage.createTransactions(pendingTx.map(p => ({ ...p.data, holdingId: p.holding.pending ? p.holding.created.id : p.holding.id })));
       imported = pendingTx.length;
     } catch (e) {
-      made.forEach(id => { try { Storage.deleteHolding(id); } catch (_) { /* best effort */ } });
+      let back = true;
+      if (Storage.takeBackHoldings) back = Storage.takeBackHoldings(made);
+      else made.forEach(id => { try { Storage.deleteHolding(id); } catch (_) { /* best effort */ } });
       setImporting(false);
       if (window.MIAnalytics) window.MIAnalytics.track('dl_mi_portfolio_import', { row_count: 0, success: false });
-      setError(`Nothing was imported: ${(e && e.message) || 'the data could not be saved'}`);
+      const why = (e && e.message) || 'the data could not be saved';
+      setError(back === true ? `Nothing was imported: ${why}` : back.message);
       return;
     }
 
@@ -913,6 +955,18 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
     const fs = stopped.map(r => r.failed).filter(Boolean);
     return fs.find(f => f.limited) || fs[0] || null;
   })();
+  // The rows the limit left unchecked are looked up again by themselves once
+  // its wait is over -- once per preview, with Check again reading
+  // "Loading…" meanwhile; Check again stays for a run by hand. They stayed
+  // "Not checked" after the wait until it was pressed, where every other
+  // screen asks again by itself. The preview
+  // left (Back, closed) takes the line and its wait with it: nothing is sent.
+  const autoRecheck = autoRecheckLeftRef.current > 0 && stopped.some(r => r.failed && r.failed.limited) ? () => {
+    if (importing || rechecking || autoRecheckLeftRef.current < 1) return;
+    autoRecheckLeftRef.current = 0;
+    const again = previewData.filter(r => (r.unchecked || r.recheck) && r.failed && r.failed.limited);
+    if (again.length) generatePreview(again);
+  } : null;
   const stopWords = (() => {
     if (!stopped.length) return '';
     const SC = window.SymbolCode;
@@ -1135,7 +1189,7 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
             <div data-import-check="" style={{ marginBottom: 12 }}>
               {window.RateLimitWait && window.RateLimitWait.FailNote
                 ? <window.RateLimitWait.FailNote failure={stopFailure} text={stopWords} label="Check again" onRetry={checkAgain}
-                    autoRetry={false} panel={RECHECK_BUSY} busyKey={RECHECK_BUSY} isDark={isDark}
+                    onReload={autoRecheck || undefined} autoRetry={Boolean(autoRecheck)} panel={RECHECK_BUSY} busyKey={RECHECK_BUSY} isDark={isDark}
                     style={{ fontSize: 12, color: C3.warning }} />
                 : (
                   <div style={{ fontSize: 12, lineHeight: 1.5, color: C3.warning }}>

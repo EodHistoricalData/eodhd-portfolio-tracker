@@ -295,7 +295,7 @@ window.TaxView = function TaxView({ portfolioId, holdings, holdingsData, baseCur
       // Section 3: Tax-Loss Harvesting
       (harvestingCandidates.length > 0 || unpricedWhy) && React.createElement('div', { style: styles.card },
         React.createElement(sectionTag, { style: styles.sectionTitle }, harvestingCandidates.length > 0 ? `Tax-Loss Harvesting (${harvestingCandidates.length} candidate${harvestingCandidates.length === 1 ? '' : 's'})` : 'Tax-Loss Harvesting'),
-        unpricedWhy && React.createElement('div', { 'data-unpriced-why': 'true', style: { fontSize: 12, lineHeight: 1.5, marginBottom: harvestingCandidates.length ? 4 : 0, color: isDark ? C3.textMutedDark : C3.textMutedLight } },
+        unpricedWhy && React.createElement('div', { 'data-unpriced-why': 'true', 'data-own-fail': 'quotes', style: { fontSize: 12, lineHeight: 1.5, marginBottom: harvestingCandidates.length ? 4 : 0, color: isDark ? C3.textMutedDark : C3.textMutedLight } },
           React.createElement('span', { role: 'status' }, unpricedWhy + ' The list leaves out the positions without a value.'),
           onRetryPrices && window.RateLimitWait && window.RateLimitWait.RetryButton && React.createElement(window.RateLimitWait.RetryButton, {
             busyKey: 'prices', isDark, onClick: onRetryPrices,

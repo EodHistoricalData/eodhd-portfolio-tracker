@@ -45,8 +45,11 @@ window.PortfolioFundamentals = (() => {
     if (e && e.promise && now() - e.startedAt < JOIN_MS) return e.promise;
     if (e && !e.promise && now() - e.at < TTL) return Promise.resolve(e.value);
     // Asked with throwErrors so the reason is known; a failure still
-    // answers null, as before, and is remembered for many().
-    const p = slot(() => Promise.resolve(window.EODHD_API.getFundamentals(apiKey, symbol, { throwErrors: true }))
+    // answers null, as before, and is remembered for many(). Every caller
+    // names a failure in its own line with Try again (missedText), so the
+    // open apps' panel stays out of it (reportsFailure; the terminal's client
+    // ignores it).
+    const p = slot(() => Promise.resolve(window.EODHD_API.getFundamentals(apiKey, symbol, { throwErrors: true, reportsFailure: true }))
       .then((v) => {
         // {"message"} with 200 (the open apps' client hands it over as it
         // came) could not be read.
@@ -59,13 +62,21 @@ window.PortfolioFundamentals = (() => {
         if (store.get(k) && store.get(k).promise === p) {
           if (answered(v)) store.set(k, { at: now(), value: v }); else store.delete(k);
         }
+        settled(symbol);
         return v;
       }, (err) => {
         if (store.get(k) && store.get(k).promise === p) store.delete(k);
+        settled(symbol);
         throw err;
       });
     store.set(k, { promise: p, startedAt: now() });
     return p;
+  }
+  // Told when a request settles, answered or failed: a view that names what
+  // did not come (missed()) draws again. Health drew before the allocation's
+  // look-up failed and stayed on "? Sectors" with no line.
+  function settled(symbol) {
+    try { window.dispatchEvent(new CustomEvent('portfolio:fundamentals-settled', { detail: { symbol } })); } catch (e) { /* a courtesy */ }
   }
   function dropFreeLimited(lifted) {
     const API = window.EODHD_API;
@@ -98,7 +109,68 @@ window.PortfolioFundamentals = (() => {
   }
   // What the last request for a symbol threw when it did not come back.
   const failureOf = (apiKey, symbol) => fails.get(keyOf(apiKey, symbol)) || null;
-  return { get, many, failureOf, dropFreeLimited, TTL, JOIN_MS, CAP, clear: () => store.clear() };
+  // The symbols whose fundamentals did not come because the request failed
+  // -- the limit, EODHD's error, no answer, an answer that could not be read
+  // (RateLimitWait.outage) -- in the order given, with the first failure:
+  // { symbols, failure }, or null. A plan's refusal or a 404 is an answer.
+  function missed(apiKey, symbols) {
+    const RLW = window.RateLimitWait;
+    if (!RLW || !RLW.outage) return null;
+    const out = [];
+    let failure = null;
+    [...new Set((symbols || []).filter(Boolean))].forEach((sym) => {
+      const e = store.get(keyOf(apiKey, sym));
+      if (e && !e.promise) return;
+      const f = fails.has(keyOf(apiKey, sym)) ? RLW.outage(fails.get(keyOf(apiKey, sym))) : null;
+      if (!f) return;
+      out.push(sym);
+      failure = failure || f;
+    });
+    return out.length ? { symbols: out, failure } : null;
+  }
+  // The one line every portfolio place fed by fundamentals says a failure
+  // with -- By Sector, Risk's beta, Dividends, Health's sectors -- as the
+  // prices' line says theirs: what, for which positions, and why. A
+  // failure was named only by Projected Income, without Try again; By
+  // Sector read "Unclassified" and Risk "N/A" with no reason.
+  function missedText(m) {
+    const RLW = window.RateLimitWait;
+    const Calc = window.PortfolioCalculations;
+    if (!m || !m.symbols || !m.symbols.length) return '';
+    const n = m.symbols.length;
+    const names = Calc && Calc.namesList ? Calc.namesList(m.symbols) : m.symbols.join(', ');
+    return `Fundamentals did not load for ${n} position${n === 1 ? '' : 's'} (${names}): ${RLW.failReason(m.failure)}`;
+  }
+  // The sectors of the stock positions stored without one, looked up and
+  // stored (General.Sector), each told as it comes (`onLearned(holding,
+  // sector)` and the 'portfolio:sector-learned' event Health listens to).
+  // Answers what did not come because its request failed (missed()).
+  // `cancelled()`: stop between positions.
+  // The ones whose request failed go first, every one of them, then the rest
+  // up to 25: with 25 kept (no sector in them) before a 26th that failed,
+  // Health named the 26th and its Try again asked only the first 25.
+  async function learnSectors(apiKey, holdings, onLearned, cancelled) {
+    const Storage = window.PortfolioStorage;
+    const sectorless = (holdings || []).filter(h => h && h.symbol && !h.sector
+      && (h.type || 'stock') === 'stock'
+      && !/\.(FOREX|CC|INDX|GBOND|COMM|MONEY)$/i.test(h.symbol));
+    const failedFirst = sectorless.filter(h => fails.has(keyOf(apiKey, h.symbol)));
+    const wanted = failedFirst.concat(sectorless.filter(h => failedFirst.indexOf(h) === -1).slice(0, Math.max(0, 25 - failedFirst.length)));
+    for (const h of wanted) {
+      if (cancelled && cancelled()) return null;
+      let f = null;
+      try { f = await get(apiKey, h.symbol); } catch (e) { f = null; }
+      const sector = f && f.General && f.General.Sector;
+      if ((cancelled && cancelled()) || !sector || typeof sector !== 'string') continue;
+      try { if (Storage) Storage.updateHolding(h.id, { sector }); } catch (e) { /* kept for this session anyway */ }
+      if (onLearned) onLearned(h, sector);
+      // The Health widget counts sectors and holds the records as they
+      // were when the page loaded: tell it one has arrived.
+      try { window.dispatchEvent(new CustomEvent('portfolio:sector-learned', { detail: { id: h.id, sector } })); } catch (e) { /* a courtesy */ }
+    }
+    return missed(apiKey, wanted.map(h => h.symbol));
+  }
+  return { get, many, failureOf, missed, missedText, learnSectors, dropFreeLimited, TTL, JOIN_MS, CAP, clear: () => { store.clear(); fails.clear(); } };
 })();
 // The quote currency of a backtest's instrument: the held position's, else
 // the search's row for that listing, else the one its exchange usually
@@ -251,21 +323,62 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
   // holding still without one, here, and store it on the holding.
   const sectorKey = holdings.map(h => h.id + ':' + (h.sector || '')).join(',');
   const sectorsDeferred = activeTab === 'montecarlo' && monteCarloGate !== 'open';
+  // A sector look-up that failed (the limit, EODHD's error, no answer): the
+  // first such failure, said on By Sector with its reason and asked again
+  // (Try again, or by itself once the limit's wait is over). With a priced
+  // position and no sector, By Sector read "No sector data" -- or, with
+  // another position unpriced, "Needs current prices — none came back".
+  const [sectorsFail, setSectorsFail] = React.useState(null);
+  const [sectorsTry, setSectorsTry] = React.useState(0);
+  // A sector another card learned (Health's Try again) and a request that
+  // settled meanwhile are read here too: By Sector kept "Fundamentals did
+  // not load" and no breakdown beside the sector Health had found. The failure line keeps only what is still missing.
+  React.useEffect(() => {
+    const learned = (e) => {
+      const d = e && e.detail;
+      if (!d || !d.id || typeof d.sector !== 'string' || !d.sector) return;
+      setLearnedSectors(prev => (prev[d.id] === d.sector ? prev : { ...prev, [d.id]: d.sector }));
+    };
+    const settled = () => {
+      const PFm = window.PortfolioFundamentals;
+      if (!PFm || typeof PFm.missed !== 'function') return;
+      setSectorsFail(prev => (prev && prev.symbols ? PFm.missed(apiKey, prev.symbols) : prev));
+    };
+    window.addEventListener('portfolio:sector-learned', learned);
+    window.addEventListener('portfolio:fundamentals-settled', settled);
+    return () => {
+      window.removeEventListener('portfolio:sector-learned', learned);
+      window.removeEventListener('portfolio:fundamentals-settled', settled);
+    };
+  }, [apiKey]);
   React.useEffect(() => {
     if (sectorsDeferred) return;
     if (!apiKey || !window.EODHD_API || !window.EODHD_API.getFundamentals) return;
     const missing = holdings.filter(h => h && h.symbol && !h.sector && !learnedSectors[h.id]
       && (h.type || 'stock') === 'stock'
       && !/\.(FOREX|CC|INDX|GBOND|COMM|MONEY)$/i.test(h.symbol));
-    if (!missing.length) return;
+    if (!missing.length) { setSectorsFail(null); return; }
     let cancelled = false;
     setSectorsLoading(true);
     (async () => {
-      for (const h of missing.slice(0, 25)) {
+      // The positions whose look-up failed, and the first failure:
+      // { symbols, failure } for the line (PortfolioFundamentals.missedText).
+      const failedFor = [];
+      let failure = null;
+      // The ones whose last request failed first, as learnSectors takes them.
+      const PFm = window.PortfolioFundamentals;
+      const failedBefore = missing.filter(h => PFm.failureOf && PFm.failureOf(apiKey, h.symbol));
+      const order = failedBefore.concat(missing.filter(h => failedBefore.indexOf(h) === -1));
+      for (const h of order.slice(0, Math.max(25, failedBefore.length))) {
         if (cancelled) return;
         try {
           const f = await window.PortfolioFundamentals.get(apiKey, h.symbol);
           const sector = f && f.General && f.General.Sector;
+          if (!f && window.RateLimitWait) {
+            const why = window.PortfolioFundamentals.failureOf(apiKey, h.symbol);
+            const out = why ? window.RateLimitWait.outage(why) : null;
+            if (out) { failedFor.push(h.symbol); failure = failure || out; }
+          }
           if (cancelled || !sector || typeof sector !== 'string') continue;
           try { Storage.updateHolding(h.id, { sector }); } catch (e) { /* kept for this session anyway */ }
           setLearnedSectors(prev => ({ ...prev, [h.id]: sector }));
@@ -274,11 +387,13 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
           try { window.dispatchEvent(new CustomEvent('portfolio:sector-learned', { detail: { id: h.id, sector } })); } catch (e) { /* a courtesy */ }
         } catch (e) { /* the next open tries again */ }
       }
-      if (!cancelled) setSectorsLoading(false);
+      // Named in the order held, whichever was asked first.
+      failedFor.sort((a, b) => missing.findIndex(h => h.symbol === a) - missing.findIndex(h => h.symbol === b));
+      if (!cancelled) { setSectorsFail(failedFor.length ? { symbols: failedFor, failure } : null); setSectorsLoading(false); }
     })();
     return () => { cancelled = true; setSectorsLoading(false); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiKey, sectorKey, sectorsDeferred]);
+  }, [apiKey, sectorKey, sectorsDeferred, sectorsTry]);
   // Shares are held and no price came back for them. `holdings` are the
   // stored records and carry no quantity -- it is worked out from the
   // transactions and arrives in holdingsData -- so asking them never said
@@ -303,7 +418,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
   const unpricedLineText = pricesLoading ? '' : Calc.unpricedLine(holdingsWithData, baseCurrency || 'USD');
   const unpricedSyms = Calc.unpricedSymbols(holdingsWithData);
   const leftOutLine = (tail, style) => (unpricedLineText && anyPricedHeld ? (
-    <p data-unpriced-why="true" style={{ margin: '0 0 12px', fontSize: 12, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight, ...style }}>
+    <p data-unpriced-why="true" data-own-fail="quotes" style={{ margin: '0 0 12px', fontSize: 12, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight, ...style }}>
       <span role="status">{unpricedLineText}{tail ? ' ' + tail : ''}</span>{retryPrices}
     </p>
   ) : null);
@@ -329,6 +444,27 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
   };
   const unpricedHeld = holdingsWithData.filter(h => h.priceUnavailable && Number(h.quantity) > 0).length;
   const anyPricedHeld = holdingsWithData.some(h => !h.priceUnavailable && Number(h.quantity) > 0 && Number(h.currentValue) > 0);
+  // "None came back" only when no position has a price. By Sector said it
+  // with MSFT priced and KO not: the cards are of the
+  // priced positions, and the line above them names the ones left out.
+  const nonePriced = needsPrices && !anyPricedHeld;
+  // None priced because the prices (or their rates) failed -- EODHD's error,
+  // the limit, no answer, an answer that could not be read -- not because
+  // the plan refused them: Risk then says it as the other tabs do. A refusal keeps Risk's "Not measured".
+  const pricesFailedAll = (rows) => {
+    const held = rows.filter(h => h.priceUnavailable && Number(h.quantity) > 0);
+    return held.length > 0 && !rows.some(h => !h.priceUnavailable && Number(h.quantity) > 0 && Number(h.currentValue) > 0)
+      && held.some(h => { const f = h.fxUnavailable ? h.fxFail : h.priceFail; return Boolean(f && window.RateLimitWait.outage(f)); });
+  };
+  const riskNoPrices = nonePriced && pricesFailedAll(holdingsWithData);
+  // Priced positions whose sector is not known because its look-up failed:
+  // said under By Sector, with the reason and Try again -- in the words of
+  // every place fed by fundamentals (PortfolioFundamentals.missedText).
+  const PF = window.PortfolioFundamentals;
+  const sectorsFailNote = sectorsFail && !sectorsLoading && holdingsWithData.some(h => !h.priceUnavailable && Number(h.quantity) > 0 && !Calc.sectorOf(h)) ? (
+    <RLW.FailNote panel="portfolio-sectors" ownFail="fundamentals" failure={sectorsFail.failure} text={PF.missedText(sectorsFail)} onRetry={() => setSectorsTry(n => n + 1)} isDark={isDark}
+      style={{ fontSize: compact ? 12 : 13, marginTop: 8, color: isDark ? C3.textMutedDark : C3.textMutedLight }} buttonStyle={{ fontFamily: "'Sora', sans-serif" }} />
+  ) : null;
   const allocationByType = Calc.getAllocationByType(holdingsWithData);
   const allocationBySector = Calc.getAllocationBySector(holdingsWithData);
   const allocationByCurrency = Calc.getAllocationByCurrency(holdingsWithData);
@@ -662,6 +798,13 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
   };
 
   const loadRiskMetrics = async () => {
+    // Nothing priced, the prices having failed: nothing to weigh, and the tab
+    // says why (riskNoPrices); no fundamentals or histories are asked for it.
+    if (pricesFailedAll(holdingsWithData)) {
+      setRiskMetrics(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       const totalValue = Calc.getTotalValue(holdingsWithData);
@@ -722,6 +865,9 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
       // as if it had been measured.
       portfolioBeta = betaWeightSum > 0 ? portfolioBeta / betaWeightSum : null;
       const betaCoverage = betaValueSeen > 0 ? betaWeightSum / betaValueSeen : 0;
+      // The priced positions whose fundamentals failed: the beta leaves
+      // them out, and the card says which and why, with Try again.
+      const fundMissed = window.PortfolioFundamentals.missed(apiKey, stockHoldings.filter(h => h.currentValue).map(h => h.symbol));
 
       // Volatility, drawdown, Sharpe and VaR from a year of market prices.
       //
@@ -814,6 +960,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
         // not "Not enough price history".
         historyFailed: series.failed,
         historyFailedCount: series.failedCount,
+        fundMissed,
       });
     } catch (e) {
       console.error('Risk metrics error:', e);
@@ -909,12 +1056,17 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
         setDividendProjection({ forPortfolio, needsPrices: true, unpriced });
         return;
       }
+      // The holdings whose fundamentals failed (not a plan without the
+      // feed): named, with why and Try again.
+      const fundMissed = window.PortfolioFundamentals.missed(apiKey, holdingsWithData
+        .filter(h => !h.priceUnavailable && Number(h.quantity) > 0 && h.symbol && incomeKinds.includes(h.type))
+        .map(h => h.symbol));
       if (asked > 0 && answered === 0) {
         // Why, when the requests failed (not a plan without the feed): the
         // limit, EODHD's error, a page that could not be read.
         const f = divFunds._failed ? window.RateLimitWait.failure(divFunds._failed) : null;
         const notServed = f && (f.limited || f.unreadable || f.status >= 500 || f.status === 0) ? f : null;
-        setDividendProjection({ forPortfolio, unavailable: true, asked, failed: notServed });
+        setDividendProjection({ forPortfolio, unavailable: true, asked, failed: notServed, fundMissed: notServed ? fundMissed : null });
         return;
       }
       setDividendProjection({
@@ -924,6 +1076,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
         unpriced,
         // Some holdings had no fundamentals: the estimate leaves them out, and says so.
         partial: answered < asked ? asked - answered : 0,
+        fundMissed,
         monthlyProjection,
         upcomingDividends: upcomingDividends.sort((a, b) => a.daysUntil - b.daysUntil)
       });
@@ -1551,19 +1704,22 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
             <div style={compact ? { ...styles.card, padding: 10, marginBottom: 10 } : styles.card}>
               <h3 style={{ fontWeight: 600, marginBottom: compact ? 10 : 16, marginTop: 0, fontSize: compact ? 12 : undefined }}>By Asset Type</h3>
               {allocationByType.length > 0 ? <AllocationBar data={allocationByType} colorMap={COLORS.type} labelMap={TYPE_LABELS} />
-                : <p style={{ textAlign: 'center', padding: compact ? 8 : 16, color: isDark ? C3.textMutedDark : C3.textMutedLight, fontSize: compact ? 12 : undefined }}>{pricesLoading ? 'Loading prices…' : needsPrices ? <>{needsPricesWords}{retryPrices}</> : 'No holdings yet'}</p>}
+                : <p style={{ textAlign: 'center', padding: compact ? 8 : 16, color: isDark ? C3.textMutedDark : C3.textMutedLight, fontSize: compact ? 12 : undefined }}>{pricesLoading ? 'Loading prices…' : nonePriced ? <>{needsPricesWords}{retryPrices}</> : 'No holdings yet'}</p>}
             </div>
             <div style={compact ? { ...styles.card, padding: 10, marginBottom: 10 } : styles.card}>
               <h3 style={{ fontWeight: 600, marginBottom: compact ? 10 : 16, marginTop: 0, fontSize: compact ? 12 : undefined }}>By Sector</h3>
               {allocationBySector.length > 0 ? <AllocationBar data={allocationBySector} colorMap={COLORS.sector} labelMap={sectorsLoading ? { [Calc.UNCLASSIFIED_SECTOR]: 'Sector loading…' } : undefined} />
-                : <p style={{ textAlign: 'center', padding: compact ? 8 : 16, color: isDark ? C3.textMutedDark : C3.textMutedLight, fontSize: compact ? 12 : undefined }}>{pricesLoading ? 'Loading prices…' : sectorsLoading ? 'Loading sectors…' : needsPrices ? needsPricesWords : 'No sector data'}</p>}
+                : pricesLoading || sectorsLoading || nonePriced || !sectorsFailNote
+                  ? <p style={{ textAlign: 'center', padding: compact ? 8 : 16, color: isDark ? C3.textMutedDark : C3.textMutedLight, fontSize: compact ? 12 : undefined }}>{pricesLoading ? 'Loading prices…' : sectorsLoading ? 'Loading sectors…' : nonePriced ? needsPricesWords : 'No sector data'}</p>
+                  : null}
+              {!pricesLoading && !nonePriced && sectorsFailNote}
             </div>
             <div style={compact ? { ...styles.card, padding: 10, marginBottom: 10 } : styles.card}>
               <h3 style={{ fontWeight: 600, marginBottom: compact ? 10 : 16, marginTop: 0, fontSize: compact ? 12 : undefined }}>By Currency</h3>
               {/* Empty is "nothing valued", not one currency: with every
                   price refused it read "Single currency portfolio". */}
               {allocationByCurrency.length > 0 ? <AllocationBar data={allocationByCurrency} colorMap={COLORS.sector} />
-                : <p style={{ textAlign: 'center', padding: compact ? 8 : 16, color: isDark ? C3.textMutedDark : C3.textMutedLight, fontSize: compact ? 12 : undefined }}>{pricesLoading ? 'Loading prices…' : needsPrices ? needsPricesWords : 'No holdings yet'}</p>}
+                : <p style={{ textAlign: 'center', padding: compact ? 8 : 16, color: isDark ? C3.textMutedDark : C3.textMutedLight, fontSize: compact ? 12 : undefined }}>{pricesLoading ? 'Loading prices…' : nonePriced ? needsPricesWords : 'No holdings yet'}</p>}
             </div>
 
             {/* Geography Allocation */}
@@ -1588,7 +1744,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                   ))}
                 </div>
               ) : (
-                <p style={{ textAlign: 'center', padding: 16, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{pricesLoading ? 'Loading prices…' : needsPrices ? needsPricesWords : 'No geographic data'}</p>
+                <p style={{ textAlign: 'center', padding: 16, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{pricesLoading ? 'Loading prices…' : nonePriced ? needsPricesWords : 'No geographic data'}</p>
               )}
             </div>
           </>
@@ -1597,7 +1753,18 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
         {/* Risk Tab */}
         {activeTab === 'risk' && (
           <>
-            {loading ? (
+            {/* No position has a price, the prices having failed: said as the other tabs say it, with
+                the prices' Try again (and their reload after the limit's
+                wait). Every card read "N/A — Not enough price history" and
+                the beta "Needs fundamentals data", with no reason and no Try
+                again. */}
+            {riskNoPrices && !pricesLoading ? (
+              <p data-risk-none-priced="true" data-own-fail="quotes" style={{ textAlign: 'center', padding: 16, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+                {/* The words a live region, as every such line; the Try again
+                    outside it. */}
+                <span role="status">{needsPricesWords}</span>{retryPrices}
+              </p>
+            ) : loading ? (
               <div style={{ textAlign: 'center', padding: 48 }}>
                 <div style={{ width: 32, height: 32, border: '3px solid transparent', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 12px' }} />
                 <p style={{ color: isDark ? C3.textMutedDark : C3.textMutedLight }}>Calculating risk metrics...</p>
@@ -1655,7 +1822,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                       </div>
                       <div style={{ fontSize: 11, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
                         {riskMetrics.beta == null
-                          ? 'Needs fundamentals data — none came back'
+                          ? (riskMetrics.fundMissed ? 'Fundamentals did not load' : 'Needs fundamentals data — none came back')
                           : riskMetrics.beta > 1.02 ? 'More volatile than market' : riskMetrics.beta < 0.98 ? 'Less volatile than market' : 'Moves with the market'}
                       </div>
                     </div>
@@ -1693,10 +1860,19 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                     </div>
                   </div>
 
+                  {/* The beta's fundamentals that failed, named with Try again;
+                      once by itself after the limit's wait -- unless the
+                      histories' line below reloads the tab already. */}
+                  {riskMetrics.fundMissed && (
+                    <RLW.FailNote panel="risk-fundamentals" ownFail="fundamentals" failure={riskMetrics.fundMissed.failure} text={PF.missedText(riskMetrics.fundMissed)}
+                      extra={riskMetrics.beta == null ? '' : 'The beta leaves those positions out.'}
+                      onRetry={loadRiskMetrics} autoRetry={!(riskMetrics.historyFailed && riskMetrics.historyFailed.limited)} isDark={isDark}
+                      style={{ fontSize: 12, marginTop: 10 }} buttonStyle={{ fontFamily: "'Sora', sans-serif" }} />
+                  )}
                   {/* What the numbers rest on. A risk figure without its window
                       and coverage is a number with no way to argue with it. */}
                   {riskMetrics.historyFailed && (
-                    <RLW.FailNote panel="risk" what={historyWhat(riskMetrics.historyFailedCount)} failure={riskMetrics.historyFailed} onRetry={loadRiskMetrics} isDark={isDark}
+                    <RLW.FailNote panel="risk" ownFail="history" what={historyWhat(riskMetrics.historyFailedCount)} failure={riskMetrics.historyFailed} onRetry={loadRiskMetrics} isDark={isDark}
                       extra={riskMetrics.insufficientHistory ? '' : 'The figures leave those positions out.'}
                       style={{ fontSize: 12, marginTop: 10 }} buttonStyle={{ fontFamily: "'Sora', sans-serif" }} />
                   )}
@@ -1802,7 +1978,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                 </div>
                 {/* Which positions the value leaves out, and why. */}
                 {unpricedHeld > 0 && unpricedLineText && (
-                  <p data-unpriced-why="true" style={{ margin: '0 0 16px', fontSize: 12, lineHeight: 1.5, textAlign: 'center', color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{unpricedLineText}{retryPrices}</p>
+                  <p data-unpriced-why="true" data-own-fail="quotes" style={{ margin: '0 0 16px', fontSize: 12, lineHeight: 1.5, textAlign: 'center', color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{unpricedLineText}{retryPrices}</p>
                 )}
                 <div style={{ borderTop:`1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}`, paddingTop: 16 }}>
                   <div style={{ fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight, marginBottom: 8 }}>Investment History</div>
@@ -1840,9 +2016,13 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                   Projected income needs current prices — none came back for your {dividendProjection.unpriced} holding{dividendProjection.unpriced === 1 ? '' : 's'}.{unpricedWhyText ? ' ' + unpricedWhyText : ''} Dividends you record still count in Historical Income below.{retryPrices}
                 </p>
               ) : dividendProjection && dividendProjection.unavailable && dividendProjection.failed ? (
-                <p style={{ margin: 0, padding: '8px 0', fontSize: 13, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
-                  <span role="status">{window.RateLimitWait.failText('Projected income needs the Fundamentals feed, which', dividendProjection.failed)}</span> Dividends you record still count in Historical Income below.
-                </p>
+                // In the words every place fed by fundamentals uses, with Try
+                // again and the reload after the limit's wait: it named the
+                // reason only, and nothing asked again.
+                <RLW.FailNote panel="dividends-fundamentals" ownFail="fundamentals" failure={dividendProjection.failed}
+                  text={PF.missedText(dividendProjection.fundMissed) || RLW.failText('Fundamentals', dividendProjection.failed)}
+                  extra="Dividends you record still count in Historical Income below." onRetry={loadDividendProjection} isDark={isDark}
+                  style={{ padding: '8px 0', fontSize: 13, color: isDark ? C3.textMutedDark : C3.textMutedLight }} buttonStyle={{ fontFamily: "'Sora', sans-serif" }} />
               ) : dividendProjection && dividendProjection.unavailable ? (
                 <p style={{ margin: 0, padding: '8px 0', fontSize: 13, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
                   Projected income unavailable — it needs the Fundamentals feed (dividend yield and per-share dividend), which this EODHD plan did not return for any of your {dividendProjection.asked} holding{dividendProjection.asked === 1 ? '' : 's'}. Dividends you record still count in Historical Income below.
@@ -1850,13 +2030,17 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
               ) : dividendProjection ? (
                 <>
                   {dividendProjection.unpriced > 0 && (
-                    <p data-unpriced-why="true" style={{ margin: '0 0 12px', fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+                    <p data-unpriced-why="true" data-own-fail="quotes" style={{ margin: '0 0 12px', fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
                       {unpricedLineText
                         ? <><span role="status">{unpricedLineText} The estimate leaves out the positions without a value.</span>{retryPrices}</>
                         : `Estimate leaves out ${dividendProjection.unpriced} holding${dividendProjection.unpriced === 1 ? '' : 's'} with no current price.`}
                     </p>
                   )}
-                  {dividendProjection.partial > 0 && (
+                  {dividendProjection.partial > 0 && dividendProjection.fundMissed ? (
+                    <RLW.FailNote panel="dividends-fundamentals" ownFail="fundamentals" failure={dividendProjection.fundMissed.failure} text={PF.missedText(dividendProjection.fundMissed)}
+                      extra="The estimate leaves them out." onRetry={loadDividendProjection} isDark={isDark}
+                      style={{ margin: '0 0 12px', fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }} buttonStyle={{ fontFamily: "'Sora', sans-serif" }} />
+                  ) : dividendProjection.partial > 0 && (
                     <p style={{ margin: '0 0 12px', fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
                       Estimate leaves out {dividendProjection.partial} holding{dividendProjection.partial === 1 ? '' : 's'} with no fundamentals data.
                     </p>
@@ -2006,7 +2190,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                   The first transaction is {benchmarkData.since}: under 90 days of history, so there is no annual return to compare yet.
                 </p>
               ) : benchmarkData && benchmarkData.failed ? (
-                <RLW.FailNote panel="benchmark" what="The price history for the comparison" failure={benchmarkData.failed} onRetry={loadBenchmarkComparison} isDark={isDark}
+                <RLW.FailNote panel="benchmark" ownFail="history" what="The price history for the comparison" failure={benchmarkData.failed} onRetry={loadBenchmarkComparison} isDark={isDark}
                   style={{ textAlign: 'center', padding: 24 }} buttonStyle={{ fontFamily: "'Sora', sans-serif" }} />
               ) : benchmarkData ? (
                 <div>
@@ -2039,13 +2223,13 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                   {benchmarkData.lastYear ? (
                   <div style={{ paddingTop: 16, marginTop: 16, borderTop: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}`, fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight, lineHeight: 1.5 }}>
                     Compared over the last year (since {benchmarkData.since}): the positions you hold today, at today's weights{benchmarkData.covered != null && benchmarkData.covered < 0.995 ? `, ${Math.round(benchmarkData.covered * 100)}% of the portfolio's value` : ''}, against SPY.{benchmarkData.cut ? ' Older history needs a paid plan.' : ''}
-                    {unpricedLineText && anyPricedHeld ? <> <span data-unpriced-why="true" role="status">{unpricedLineText} The comparison leaves out the positions without a value.</span>{retryPrices}</> : null}
+                    {unpricedLineText && anyPricedHeld ? <> <span data-unpriced-why="true" data-own-fail="quotes" role="status">{unpricedLineText} The comparison leaves out the positions without a value.</span>{retryPrices}</> : null}
                   </div>
                   ) : (
                   <div style={{ paddingTop: 16, marginTop: 16, borderTop: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}`, fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight, lineHeight: 1.5 }}>
                     Since {benchmarkData.since}. Total return over everything paid in: {benchmarkData.totalReturnPercent == null ? 'n/a' : Calc.formatPercent(benchmarkData.totalReturnPercent)}
                     {benchmarkData.excluded && !unpricedLineText ? ` — ${benchmarkData.excluded} unpriced position${benchmarkData.excluded === 1 ? '' : 's'} left out` : ''}.
-                    {benchmarkData.excluded && unpricedLineText ? <> <span data-unpriced-why="true" role="status">{unpricedLineText} The return leaves out the positions without a value.</span>{retryPrices}</> : null}
+                    {benchmarkData.excluded && unpricedLineText ? <> <span data-unpriced-why="true" data-own-fail="quotes" role="status">{unpricedLineText} The return leaves out the positions without a value.</span>{retryPrices}</> : null}
                   </div>
                   )}
                 </div>
@@ -2134,7 +2318,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
             {loading ? (
               <div style={{ textAlign: 'center', padding: 32 }}><div style={{ width: 24, height: 24, border: '3px solid rgba(255,255,255,0.1)', borderTopColor: C3.glowOrange, borderRadius: '50%', animation: 'spin .8s linear infinite', margin: '0 auto' }} /></div>
             ) : correlationMatrix?.failed ? (
-              <RLW.FailNote panel="correlation" text={correlationMatrix.error} failure={correlationMatrix.failed} onRetry={() => loadCorrelationMatrix(corrArgsRef.current)} isDark={isDark}
+              <RLW.FailNote panel="correlation" ownFail="history" text={correlationMatrix.error} failure={correlationMatrix.failed} onRetry={() => loadCorrelationMatrix(corrArgsRef.current)} isDark={isDark}
                 style={{ textAlign: 'center', padding: 32 }} buttonStyle={{ fontFamily: "'Sora', sans-serif" }} />
             ) : correlationMatrix?.error ? (
               <p style={{ textAlign: 'center', padding: 32, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{correlationMatrix.error}</p>
@@ -2150,7 +2334,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
               };
               return React.createElement(React.Fragment, null,
                 correlationMatrix.partFailed && React.createElement(RLW.FailNote, {
-                  panel: 'correlation',
+                  panel: 'correlation', ownFail: 'history',
                   what: historyWhat(correlationMatrix.partFailedCount), failure: correlationMatrix.partFailed,
                   extra: 'The table leaves those symbols out.', onRetry: () => loadCorrelationMatrix(corrArgsRef.current), isDark,
                   style: { fontSize: 12, marginBottom: 10 }, buttonStyle: { fontFamily: "'Sora', sans-serif" },
@@ -2198,7 +2382,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
             ) : loading || monteCarloGate !== 'open' ? (
               <div style={{ textAlign: 'center', padding: 32 }}><div style={{ width: 24, height: 24, border: '3px solid rgba(255,255,255,0.1)', borderTopColor: C3.glowOrange, borderRadius: '50%', animation: 'spin .8s linear infinite', margin: '0 auto' }} /></div>
             ) : monteCarloData?.failed ? (
-              <RLW.FailNote panel="montecarlo" text={monteCarloData.error} failure={monteCarloData.failed} onRetry={loadMonteCarlo} isDark={isDark}
+              <RLW.FailNote panel="montecarlo" ownFail="history" text={monteCarloData.error} failure={monteCarloData.failed} onRetry={loadMonteCarlo} isDark={isDark}
                 style={{ textAlign: 'center', padding: 32 }} buttonStyle={{ fontFamily: "'Sora', sans-serif" }} />
             ) : monteCarloData?.error ? (
               <p style={{ textAlign: 'center', padding: 32, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{monteCarloData.error}{/^Needs current prices/.test(monteCarloData.error) && retryPrices}</p>
@@ -2258,7 +2442,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                 // A run again that failed: the last simulation stays, and the
                 // failure is said above it.
                 monteCarloData.refreshFailed && React.createElement(RLW.FailNote, {
-                  panel: 'montecarlo',
+                  panel: 'montecarlo', ownFail: 'history',
                   text: monteCarloData.refreshFailed.error + ' The simulation below is the last one run.',
                   failure: monteCarloData.refreshFailed.failed, onRetry: loadMonteCarlo, isDark,
                   style: { fontSize: 12, marginBottom: 12 }, buttonStyle: { fontFamily: "'Sora', sans-serif" },

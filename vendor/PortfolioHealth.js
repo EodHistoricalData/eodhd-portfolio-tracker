@@ -46,10 +46,20 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
   const [insiderRefusal, setInsiderRefusal] = React.useState(null);
   const [earningsFail, setEarningsFail] = React.useState(null);
   const [, sectorsArrived] = React.useState(0);
+  // Drawn again when a sector is learned, and when any fundamentals request
+  // settles -- a failed one too, for the line that names it.
+  // `gone`: the card closed, for its own Try again's look-up.
+  const goneRef = React.useRef(false);
   React.useEffect(() => {
-    const on = () => sectorsArrived(n => n + 1);
+    goneRef.current = false;
+    const on = () => { if (!goneRef.current) sectorsArrived(n => n + 1); };
     window.addEventListener('portfolio:sector-learned', on);
-    return () => window.removeEventListener('portfolio:sector-learned', on);
+    window.addEventListener('portfolio:fundamentals-settled', on);
+    return () => {
+      goneRef.current = true;
+      window.removeEventListener('portfolio:sector-learned', on);
+      window.removeEventListener('portfolio:fundamentals-settled', on);
+    };
   }, []);
   const healthGate = (window.FreeLimitWalls ? window.FreeLimitWalls.useAnalyticsGate : () => 'open')('health', true);
 
@@ -291,17 +301,18 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
   };
 
   const scoreState = window.PortfolioHealthScore.state(positions, pricesLoading);
-  // What Health scores: the stored positions less the ones held without a
-  // price, as Risk measures the priced value. The score's own line says it
-  // leaves those out, yet its diversification checks and the counts under
-  // it took them in: "8 Holdings / 2 Currencies" with VOD.LSE in both while
-  // its GBX/USD rate had failed, "Multi-currency exposure" earned by it.
-  // Positions sold to zero count as before; with no
-  // score to give (prices loading, none priced) nothing is left out.
+  // A position's type, currency and sector are known without its price:
+  // the counts and the checks of what is held -- asset types, holdings,
+  // currencies, sectors, and the advice drawn from them -- are of every
+  // position; only the weights (concentration) are of the priced ones. Left
+  // out of the counts as well, a GBX position whose GBX/USD rate failed for
+  // a minute took "Multi-currency exposure" away (85 -> 80), read
+  // "Currencies 1" and advised "Consider international exposure" while the
+  // position was held (had left them out of all of
+  // it). With no failure nothing changes: `scored` is every position.
   const notPriced = scoreState === 'ok' && Array.isArray(positions)
     ? positions.filter(p => p && p.priceUnavailable && Number(p.quantity) > 0) : [];
-  const notPricedIds = new Set(notPriced.map(p => p.id));
-  const scored = notPriced.length ? holdings.filter(h => !notPricedIds.has(h.id)) : holdings;
+  const scored = holdings;
   const notPricedNames = notPriced.length && window.PortfolioCalculations && window.PortfolioCalculations.unpricedSymbols
     ? window.PortfolioCalculations.namesList(window.PortfolioCalculations.unpricedSymbols(positions)) : '';
 
@@ -367,7 +378,25 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
   // Sectors as stored now, not as they were when the page loaded: the
   // allocation looks them up and stores them, and this stayed on "?" beside
   // a sector list.
-  const sectorCount = new Set(scored.map(h => { try { const now = Storage.getHoldingById(h.id); return (now && now.sector) || h.sector; } catch (e) { return h.sector; } }).filter(Boolean)).size;
+  const storedSector = (h) => { try { const now = Storage.getHoldingById(h.id); return (now && now.sector) || h.sector; } catch (e) { return h.sector; } };
+  const sectorCount = new Set(scored.map(storedSector).filter(Boolean)).size;
+  // The stocks whose sector is not known because their fundamentals failed
+  // (the allocation's look-up, or this card's Try again): named with why and
+  // Try again, as By Sector names them. "? Sectors" said nothing. Asked again here only by Try again, or once by itself
+  // after the limit's wait (FailNote).
+  const PF = window.PortfolioFundamentals;
+  const [sectorsAsking, setSectorsAsking] = React.useState(false);
+  const sectorless = scored.filter(h => h && h.symbol && (h.type || 'stock') === 'stock'
+    && !/\.(FOREX|CC|INDX|GBOND|COMM|MONEY)$/i.test(h.symbol) && !storedSector(h));
+  const sectorsMissed = !sectorsAsking && apiKey && PF && PF.missed && sectorless.length ? PF.missed(apiKey, sectorless.map(h => h.symbol)) : null;
+  // Stops between positions once the card is gone: it asked on for every
+  // position after Health had closed.
+  const askSectorsAgain = () => {
+    if (!PF || !PF.learnSectors || sectorsAsking) return;
+    setSectorsAsking(true);
+    Promise.resolve(PF.learnSectors(apiKey, sectorless, null, () => goneRef.current)).catch(() => null)
+      .then(() => { if (!goneRef.current) setSectorsAsking(false); });
+  };
 
   // Status colours as text on this card: red "Fair" and the warnings read
   // 4.04-4.46:1 in the dark theme. Same hue, pushed to AA.
@@ -494,8 +523,8 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
                 const w = PC && PC.unpricedLine ? PC.unpricedLine(positions, baseCurrency || 'USD') : PC && PC.unpricedWhy ? PC.unpricedWhy(positions, baseCurrency || 'USD') : '';
                 if (!w) return null;
                 return (
-                  <p data-unpriced-why="true" style={{ margin: '0 0 12px', fontSize: 13, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
-                    <span role="status">{w} The score leaves out the positions without a value.</span>
+                  <p data-unpriced-why="true" data-own-fail="quotes" style={{ margin: '0 0 12px', fontSize: 13, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+                    <span role="status">{w} The score's weights leave them out.</span>
                     {onRetryPrices && (
                       <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />
                     )}
@@ -628,11 +657,16 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
                 <div style={styles.muted}>Sectors</div>
               </div>
             </div>
-            {/* The counts are of what is scored; the positions left out are
-                named as Risk names them. */}
+            {sectorsMissed && (
+              <window.RateLimitWait.FailNote panel="health-sectors" ownFail="fundamentals" failure={sectorsMissed.failure} text={PF.missedText(sectorsMissed)}
+                onRetry={askSectorsAgain} isDark={isDark}
+                style={{ margin: '8px 0 0', fontSize: 12, ...styles.muted }} buttonStyle={{ fontFamily: "'Sora', sans-serif" }} />
+            )}
+            {/* The counts are of every position; what the unpriced ones are
+                left out of is their weight, named as Risk names them. */}
             {notPricedNames && (
               <p data-health-counts-note="true" style={{ margin: '8px 0 0', fontSize: 12, lineHeight: 1.5, ...styles.muted }}>
-                Counted from the positions that have a price ({notPricedNames} not priced).
+                Weights from the positions that have a price ({notPricedNames} not priced).
               </p>
             )}
 
@@ -689,7 +723,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
             {!loading && !insiderRefusal && insiderFail && React.createElement(window.RateLimitWait.FailNote, {
               what: insiderFailFor.length && Calc && Calc.namesList ? `The insider feed for ${Calc.namesList(insiderFailFor)}`
                 : insiderData.length ? 'The insider feed for some holdings' : 'The insider feed',
-              failure: insiderFail, onRetry: loadInsiderActivity, isDark, panel: 'health-insider',
+              failure: insiderFail, onRetry: loadInsiderActivity, isDark, panel: 'health-insider', ownFail: 'insider',
               style: { marginBottom: 12 },
             })}
             {loading ? (
@@ -761,7 +795,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
             <h3 style={{ fontWeight: 600, marginBottom: 12, marginTop: 0, color: isDark ? C3.textDark : C3.textLightTheme }}>Earnings Calendar</h3>
             {!loading && earningsFail && React.createElement(window.RateLimitWait.FailNote, {
               what: earningsData.length ? 'The earnings of some holdings' : 'The earnings',
-              failure: earningsFail, onRetry: loadEarningsCalendar, isDark, panel: 'health-earnings',
+              failure: earningsFail, onRetry: loadEarningsCalendar, isDark, panel: 'health-earnings', ownFail: 'fundamentals',
               style: { marginBottom: 12 },
             })}
             {loading ? (

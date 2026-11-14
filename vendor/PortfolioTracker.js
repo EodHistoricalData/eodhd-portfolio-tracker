@@ -509,7 +509,13 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
       setSyncRev(n => n + 1);
     };
     window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
+    // A write here refused part way, its put-back refused too: what is
+    // stored is drawn, so a reload shows nothing else.
+    window.addEventListener('portfolio:storage-partial', onStorage);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('portfolio:storage-partial', onStorage);
+    };
   }, []);
 
   // The positions' names filled in from the search after a template was
@@ -1181,6 +1187,26 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   // The limit is named only when it is why the prices are missing: a wait
   // another request started later leaves "No prices came back." as it was.
   const pricesLimited = RLW.useCause(!loading && unpricedCount > 0 ? holdingsData : null);
+  // Prices the limit stopped are asked again by themselves once its wait is
+  // over, as the panels around them are (RateLimitWait.useReloadAfterWait):
+  // the table kept KO at N/A with an active Try again and sent nothing in
+  // 30 s. Once per failure, on the panels' pace; a
+  // load still running is left to end. As a press of Try again: the line
+  // stays up, busy, and a focus that was on it is put back after.
+  // A quote's failure or a currency rate's: VOD.LSE quoted in GBX, with the
+  // GBX/USD rate refused at the limit, stayed N/A after the wait -- only the
+  // quotes' failure armed this (on r26b). The quotes' first, else the
+  // first rate at the limit among the unpriced: one failure, one reload,
+  // which asks for the quotes and the rates together.
+  const rateStopped = openUnpriced.find(h => h.fxUnavailable && h.fxFail?.limited);
+  const stoppedBy = pricesFail?.limited ? pricesFail : rateStopped ? rateStopped.fxFail : null;
+  const pricesStopped = !loading && unpricedCount > 0 ? stoppedBy : null;
+  RLW.useReloadAfterWait(pricesStopped, () => {
+    if (loading) return;
+    const a = document.activeElement;
+    const onRetry = a && a.tagName === 'BUTTON' && /^(Try again|Loading…)/.test(a.textContent || '');
+    retryPrices(onRetry ? { currentTarget: a } : null);
+  }, 'portfolio-prices');
   // The reason, when the failure is known and it was not the limit.
   // Named as the other screens name them: EODHD's error (5xx), a dropped
   // connection (0), an answer that could not be read. A 404 is a code the
@@ -1248,7 +1274,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   const leftOutText = (loading && !retrying) || noneValued ? '' : Calc.unpricedLine(holdingsWithData, activePortfolio?.baseCurrency || 'USD');
   const PNL_LEFT_OUT = 'Unrealized, Price and Currency P&L leave out the positions without a value.';
   const leftOutLine = (tail, style) => (leftOutText ? (
-    <p data-unpriced-why="true" style={{ margin: '0 0 12px', fontSize: 12, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight, ...style }}>
+    <p data-unpriced-why="true" data-own-fail="quotes" style={{ margin: '0 0 12px', fontSize: 12, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight, ...style }}>
       <span role="status">{leftOutText}{tail ? ' ' + tail : ''}</span>
       <RLW.RetryButton busyKey="prices" isDark={isDark} onClick={retryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />
     </p>
@@ -1809,7 +1835,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                 // The words are the live region; the held press's note counts
                 // every second and stays outside it.
                 const showAgain = (!loading || retrying) && (pricesUpdatedAt ? unpricedCount > 0 : noneValued);
-                return <><span role="status" aria-live="polite" data-pt-price-status="true">{words}</span>{rlWait.note ? <span data-wait-note="true">{(words ? ' ' : '') + rlWait.note}</span> : null}{showAgain && <> {again}</>}</>;
+                return <><span role="status" aria-live="polite" data-pt-price-status="true" data-own-fail="quotes">{words}</span>{rlWait.note ? <span data-wait-note="true">{(words ? ' ' : '') + rlWait.note}</span> : null}{showAgain && <> {again}</>}</>;
               })()}</span>
             </div>
           </div>
@@ -2492,7 +2518,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
               const shown = (!loading || retrying) && unpricedCount > 0;
               return (
                 <div style={shown ? { fontSize: 13, marginTop: 8, color: isDark ? C3.textMutedDark : C3.textMutedLight } : undefined}>
-                  <span role="status" aria-live="polite" data-pt-price-status="true">{shown ? (loading ? 'Loading prices…' : noneValued ? noPricesWords : withRateWhy(`${unpricedCount} of ${holdings.length} positions ${unpricedCount === 1 ? 'has' : 'have'} no price${quoteMissing && pricesLimited ? ': ' + RLW.REACHED : quoteMissing && pricesWhy ? ': ' + pricesWhy : '.'}`)) : ''}</span>
+                  <span role="status" aria-live="polite" data-pt-price-status="true" data-own-fail="quotes">{shown ? (loading ? 'Loading prices…' : noneValued ? noPricesWords : withRateWhy(`${unpricedCount} of ${holdings.length} positions ${unpricedCount === 1 ? 'has' : 'have'} no price${quoteMissing && pricesLimited ? ': ' + RLW.REACHED : quoteMissing && pricesWhy ? ': ' + pricesWhy : '.'}`)) : ''}</span>
                   {shown && rlWait.note ? <span data-wait-note="true">{` ${rlWait.note}`}</span> : null}
                   {shown && <RLW.RetryButton wait={rlWait} busyKey="prices" isDark={isDark} onClick={retryPrices} style={{ marginLeft: 8, padding: '6px 12px', minHeight: 32, borderRadius: 8, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 13, fontWeight: 600, cursor: 'pointer' }} />}
                 </div>
@@ -3161,6 +3187,37 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
  * confirmation, after downloading a copy).
  */
 window.PortfolioTrackerBoundary = (() => {
+  // Trades whose position is not stored (Storage.orphanTrades): what a
+  // change the browser refused part way, its put-back refused too, can leave
+  // -- a restore of three lists that all change. No screen shows them; this
+  // line names them on the next load (and at once, when a write says it
+  // left something) and offers to delete them.
+  const OrphanTradesNote = ({ theme }) => {
+    const S = window.PortfolioStorage;
+    const count = () => { try { return S && S.orphanTrades ? S.orphanTrades().length : 0; } catch (e) { return 0; } };
+    const [n, setN] = React.useState(count);
+    const [note, setNote] = React.useState(null);
+    React.useEffect(() => {
+      const again = () => setN(count());
+      window.addEventListener('portfolio:storage-partial', again);
+      return () => window.removeEventListener('portfolio:storage-partial', again);
+    }, []);
+    if (!n && !note) return null;
+    const isDark = theme === 'dark';
+    const C3 = window.C3 || {};
+    const ink = isDark ? (C3.textDark || '#E9E6DF') : (C3.textLightTheme || '#1e1b4b');
+    const clean = () => {
+      let refused = null;
+      const gone = S.attempt(() => S.deleteOrphanTrades(), (m) => { refused = m; });
+      if (refused) { setNote(refused); return; }
+      setN(count());
+      setNote(`${gone} trade${gone === 1 ? '' : 's'} that belonged to no position ${gone === 1 ? 'was' : 'were'} deleted.`);
+    };
+    return React.createElement('div', { 'data-pt-orphan-trades': 'true', style: { margin: '12px 16px', padding: '10px 14px', borderRadius: 8, fontSize: 13, lineHeight: 1.5, color: ink, border: `1px solid ${isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.2)'}` } },
+      n ? React.createElement('span', { role: 'status' }, `${n} trade${n === 1 ? '' : 's'} in this browser belong${n === 1 ? 's' : ''} to no position: a change the browser refused part way left ${n === 1 ? 'it' : 'them'}, and no screen shows ${n === 1 ? 'it' : 'them'}. `) : null,
+      n ? React.createElement('button', { type: 'button', onClick: clean, style: { marginLeft: 4, padding: '4px 12px', minHeight: 32, borderRadius: 6, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: ink, fontSize: 12, fontWeight: 600, cursor: 'pointer' } }, n === 1 ? 'Delete it' : 'Delete them') : null,
+      note ? React.createElement('span', { role: 'status', style: { display: 'block', marginTop: n ? 6 : 0 } }, note) : null);
+  };
   function Boundary(props) {
     React.Component.call(this, props);
     this.state = { error: null };
@@ -3335,10 +3392,13 @@ window.PortfolioTrackerBoundary = (() => {
       this.state.notice && e('p', { role: 'status', style: { margin: '12px 0 0', fontSize: 13, color: text } }, this.state.notice)
     ));
   };
+  // Drawn with the view, inside the boundary, above it.
+  Boundary.OrphanTradesNote = OrphanTradesNote;
   return Boundary;
 })();
 
 window.PortfolioTrackerView = (props) => React.createElement(
   window.PortfolioTrackerBoundary, { theme: props.theme },
+  React.createElement(window.PortfolioTrackerBoundary.OrphanTradesNote, { theme: props.theme }),
   React.createElement(window.PortfolioTrackerViewInner, props)
 );

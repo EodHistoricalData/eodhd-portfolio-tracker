@@ -74,9 +74,17 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
         setShowSearch(true);
         setAnsweredFor(val.toUpperCase());
         // The limit under the field as in every picker: the wait counted
-        // down, and the search asked again by itself once it is over.
-        if (failed && limited && symbolKbRef.current && symbolKbRef.current.say) symbolKbRef.current.say(failed, { error: thrown });
-        else if (failed) setSymbolNote(failed);
+        // down, and the search asked again by itself once it is over. EODHD's
+        // error or a dropped connection the same way, with a Try again that
+        // asks again; it was "Try again." as words.
+        if (failed && (limited || (window.RateLimitWait && window.RateLimitWait.outage(thrown))) && symbolKbRef.current && symbolKbRef.current.say) symbolKbRef.current.say(failed, { error: thrown });
+        else {
+          // A refusal is said in this field's own words.
+          if (failed) setSymbolNote(failed);
+          // Either way the search is over: a Try again's ends here, and its
+          // line goes (useComboboxKeys).
+          if (symbolKbRef.current && symbolKbRef.current.searched) symbolKbRef.current.searched(val.toUpperCase());
+        }
       }, 300);
     } else {
       setSearchResults([]);
@@ -141,7 +149,9 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
     const res = await SC.resolve(typed, Object.assign(SC.apiFor(window.EODHD_API, apiKey), { rows, held: heldSymbols }));
     // `limited`: the limit stopped the check (said with the wait counting
     // down, as the search's own failure is).
-    if (!res.symbol) return res.reason === 'limited' ? { note: res.note, limited: true } : { note: res.note };
+    // `elsewhere`: a bare code listed only on other exchanges, whose
+    // listings the line offers.
+    if (!res.symbol) return res.reason === 'limited' ? { note: res.note, limited: true } : { note: res.note, elsewhere: res.elsewhere || null };
     // A holding is named by its stored key: an old "BRK.B" is sold as BRK.B.
     const sym = res.held ? res.symbol : Calc.whatIfSymbol(res.symbol, heldSymbols);
     const notBuyable = actionType !== 'sell' ? Calc.indexNotBuyable(sym) : null;
@@ -168,6 +178,7 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
       const got = await readTyped(q, searchFailedForRef.current === q ? undefined : rows);
       if (symbolNowRef.current !== q) return null;
       if (got.note && got.limited) return { note: got.note, limited: true };
+      if (got.note && got.elsewhere) return { note: got.note, elsewhere: got.elsewhere };
       if (got.note) { setSymbolNote(got.note); return null; }
       return { item: got.row };
     },
@@ -215,6 +226,8 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
     if (!got.symbol) {
       // Add, which the limit stopped, is done again once the wait is over.
       if (got.limited && symbolKbRef.current && symbolKbRef.current.say) symbolKbRef.current.say(got.note, { limited: true, redo: () => addScenarioRef.current() });
+      // Listed only elsewhere: the line under the field offers those listings.
+      else if (got.elsewhere && symbolKbRef.current && symbolKbRef.current.say) symbolKbRef.current.say(got.note, { elsewhere: got.elsewhere });
       else setSymbolNote(got.note);
       focusNext(() => wifSearchRef.current);
       return;
@@ -515,8 +528,9 @@ Diversification score: ${Math.round(result.diversificationScore)}/100 (effective
           {React.createElement(window.PortalSearchPopup, {
             anchorRef: wifSearchRef,
             // Closed while the sentence under the field shows: the list
-            // opened over it.
-            open: showSearch && searchResults.length > 0 && !symbolNote,
+            // opened over it. The shared line's too (a code listed only
+            // elsewhere, a failed search's Try again).
+            open: showSearch && searchResults.length > 0 && !symbolNote && !symbolKb.note,
             onClose: () => setShowSearch(false),
             isDark,
             maxHeight: 280,
@@ -642,7 +656,7 @@ Diversification score: ${Math.round(result.diversificationScore)}/100 (effective
               with Try again -- "Before" read $480 for a $94,000 portfolio
               when its GBP/USD rate failed. */}
           {unpricedWhy && (
-            <div data-unpriced-why="true" style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+            <div data-unpriced-why="true" data-own-fail="quotes" style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
               <span role="status">{unpricedWhy} The totals leave out the positions without a value.</span>
               {onRetryPrices && (
                 <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />

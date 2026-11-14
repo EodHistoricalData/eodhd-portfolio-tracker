@@ -265,6 +265,8 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
     // At the limit the line counts the wait down and the search is asked
     // again by itself once it is over (useComboboxKeys `search`).
     if (failed && resultsKbRef.current && resultsKbRef.current.say) resultsKbRef.current.say(failed, { error: thrown });
+    // Answered: a Try again's search ends here (useComboboxKeys).
+    else if (!failed && resultsKbRef.current && resultsKbRef.current.searched) resultsKbRef.current.searched(asked);
   };
 
   React.useEffect(() => {
@@ -297,8 +299,14 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
     const isUS = (ex) => ['US', 'NYSE', 'NASDAQ', 'AMEX', 'BATS', 'NYSE ARCA'].indexOf(String(ex || '').toUpperCase()) !== -1;
     const search = Promise.resolve(window.EODHD_API && window.EODHD_API.searchStocks ? window.EODHD_API.searchStocks(apiKey, code, { throwErrors: true }) : []);
     // No answer in time: the user is asked; an answer that comes later still
-    // fills the type and name in.
-    const timer = setTimeout(() => { if (!gone) setPrefillLookup((s) => (s === 'pending' ? 'failed' : s)); }, window.PREFILL_LOOKUP_MS);
+    // fills the type and name in. The time counts from when the search is
+    // sent: inside a 429's wait the Mini App's client holds it and asks
+    // again after (SymbolCode.searchDeadline).
+    const SCd = window.SymbolCode;
+    const outOfTime = () => { if (!gone) setPrefillLookup((s) => (s === 'pending' ? 'failed' : s)); };
+    const stopWait = SCd && SCd.searchDeadline
+      ? SCd.searchDeadline(window.PREFILL_LOOKUP_MS, outOfTime, window.EODHD_API)
+      : (() => { const t = setTimeout(outOfTime, window.PREFILL_LOOKUP_MS); return () => clearTimeout(t); })();
     prefillSearchRef.current = search
       .then((rows) => {
         if (!Array.isArray(rows)) { if (!gone) setPrefillLookup('failed'); return null; }
@@ -329,7 +337,8 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
         return hit;
       })
       .catch(() => { if (!gone) setPrefillLookup('failed'); return null; }); // the code stays the label
-    return () => { gone = true; clearTimeout(timer); };
+    search.then(stopWait, stopWait);
+    return () => { gone = true; stopWait(); };
   }, [prefillSymbol]);
 
   // The price of the asset now selected, for the date in the form: the live

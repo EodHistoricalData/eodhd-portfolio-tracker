@@ -170,9 +170,8 @@ window.PortfolioStorage = {
     }
   },
 
-  createPortfolio(data) {
-    this._refuseBlocked();
-    const portfolio = {
+  _portfolioRecord(data) {
+    return {
       id: this.generateId(),
       name: data.name || 'My Portfolio',
       icon: data.icon || 'barChart',
@@ -182,6 +181,11 @@ window.PortfolioStorage = {
       createdAt: this.getTimestamp(),
       updatedAt: this.getTimestamp()
     };
+  },
+
+  createPortfolio(data) {
+    this._refuseBlocked();
+    const portfolio = this._portfolioRecord(data);
 
     const portfolios = this.getPortfolios();
     this._freeLimit('portfolios', () => portfolios.length + 1);
@@ -195,16 +199,25 @@ window.PortfolioStorage = {
    * A new portfolio with its positions, all of them or none: a template, a
    * fund, an AI-built portfolio, an index. Throws what the failed write threw.
    */
+  // The portfolio first, then its positions in one write (_writeInOrder): a
+  // write per position, refused part way with the take-back refused too,
+  // left a portfolio with some of them under "nothing was created". Now the most that can be left is the portfolio without
+  // its positions, said, and shown.
   createPortfolioWithHoldings(data, holdings) {
     const list = Array.isArray(holdings) ? holdings : [];
     this._freeLimit('portfolios', () => this.getPortfolios().length + 1);
     this._freeLimit('positions', () => list.length);
-    const portfolio = this.createPortfolio(data);
-    try {
-      list.forEach(h => { this.createHolding({ ...h, portfolioId: portfolio.id }); });
-    } catch (e) {
-      try { this.deletePortfolio(portfolio.id); } catch (_) { /* nothing more to undo */ }
-      throw e;
+    if (!list.length) return this.createPortfolio(data);
+    this._refuseBlocked();
+    const portfolio = this._portfolioRecord(data);
+    const made = list.map(h => this._holdingRecord({ ...h, portfolioId: portfolio.id }));
+    const portfolios = this.getPortfolios().concat([portfolio]);
+    const failed = this._writeInOrder([
+      { key: this.KEYS.PORTFOLIOS, save: () => this.savePortfolios(portfolios) },
+      { key: this.KEYS.HOLDINGS, save: () => this.saveHoldings(this.getHoldings().concat(made)) },
+    ]);
+    if (failed) {
+      throw this._stopped(failed, () => `"${portfolio.name}" was created, but its ${made.length} position${made.length === 1 ? '' : 's'} could not be: `);
     }
     return portfolio;
   },
@@ -236,60 +249,110 @@ window.PortfolioStorage = {
     });
     return out;
   },
-  // Only the lists this delete wrote (`written`): putting back all three
+  // Only the lists this change wrote (`written`): putting back all three
   // rewrote, and pushed, a list it never touched -- a portfolio another tab
   // added meanwhile was erased. The account is told
   // too, as the write that went through was pushed (DataSync, debounced):
   // only a list that reads as one, never a stand-in -- an unreadable one
   // went out as [] and emptied the account's.
+  // In the order given, and no further than the first one refused: the
+  // lists after it would be put back over one that was not, a position's
+  // trades without the position. Returns the lists left as written. It
+  // returned nothing, and a put-back the browser refused as well left a
+  // half-done change that the screen did not show.
   _putBack(before, written) {
     const sections = { [this.KEYS.PORTFOLIOS]: 'pt_portfolios', [this.KEYS.HOLDINGS]: 'pt_holdings', [this.KEYS.TRANSACTIONS]: 'pt_transactions' };
-    (written || []).forEach((k) => {
+    const list = written || [];
+    for (let i = 0; i < list.length; i++) {
+      const k = list[i];
       const v = before[k];
-      if (v === undefined || !sections[k]) return;
-      try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { return; }
-      let list = null;
-      try { list = v == null ? null : JSON.parse(v); } catch (e) { list = null; }
-      if (Array.isArray(list)) window.DataSync?.pushSection(sections[k], list);
-    });
+      if (v === undefined || !sections[k]) continue;
+      try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { return list.slice(i); }
+      let parsed = null;
+      try { parsed = v == null ? null : JSON.parse(v); } catch (e) { parsed = null; }
+      if (Array.isArray(parsed)) window.DataSync?.pushSection(sections[k], parsed);
+    }
+    return [];
+  },
+
+  // The writes of one change, each { key, save }, in an order that leaves
+  // something the app can show after any of them: a delete writes the
+  // trades first, then the positions, then the portfolio; a create the
+  // other way round. A refused write puts back the ones before it, the
+  // last first (_putBack). Null when all went through, else { refused,
+  // kept }: the refusal (_writeRefused) and the lists still as written.
+  // Every list the change writes is checked before the first write, and a
+  // save that throws is put back like one that answers false: with the
+  // portfolios list unreadable under an open delete question, the trades
+  // and positions went and savePortfolios() then threw "nothing was saved
+  // over it". A throw that is not a refusal of storage is
+  // thrown on once what it left is put back.
+  _writeInOrder(steps) {
+    for (const s of steps) this._refuseUnreadable(s.key);
+    const before = this._listsBefore();
+    const written = [];
+    for (const s of steps) {
+      let ok = false;
+      let thrown = null;
+      try { ok = s.save(); } catch (e) { thrown = e; }
+      if (thrown || !ok) {
+        const refused = thrown || this._writeRefused();
+        const kept = this._putBack(before, written.slice().reverse());
+        // Nothing left changed: thrown on, said by the caller as before.
+        if (thrown && (thrown.name !== 'PortfolioStorageError' || !kept.length)) throw thrown;
+        return { refused, kept };
+      }
+      written.push(s.key);
+    }
+    return null;
+  },
+  // The refusal to throw when a change stopped: as it was when nothing is
+  // left changed; when a put-back was refused too, what is stored now --
+  // `said(kept)`, the first half of the sentence -- and why, and the screen
+  // is told to read the lists again (what it shows is what is stored).
+  _stopped(failed, said) {
+    if (!failed.kept.length) return failed.refused;
+    const code = failed.refused.code;
+    const why = code === 'blocked'
+      ? 'this browser blocks site storage, so portfolios cannot be kept here. Allow storage for this site or use another browser.'
+      : code === 'full' ? "your browser's storage for this site is full. Export a backup and delete old portfolios or transactions, then try again."
+        : String(failed.refused.message || '').replace(/^./, c => c.toLowerCase());
+    const e = new PortfolioStorageError(failed.refused.code, said(failed.kept) + why);
+    e.partial = true;
+    try { window.dispatchEvent(new CustomEvent('portfolio:storage-partial')); } catch (_) { /* a courtesy */ }
+    return e;
   },
 
   // A refused write is said (_writeRefused) and nothing is deleted. It
   // returned true whatever the writes did.
+  // The trades first, then the positions, then the portfolio: refused part
+  // way with the put-back refused too, it left positions without a
+  // portfolio and trades without a position, which no screen shows, and the
+  // portfolio came back with them gone after a reload.
   deletePortfolio(id) {
-    const before = this._listsBefore();
+    const P = this.KEYS.PORTFOLIOS, H = this.KEYS.HOLDINGS, T = this.KEYS.TRANSACTIONS;
+    this._refuseUnreadableAll([P, H, T]);
     const portfolios = this.getPortfolios();
     const filtered = portfolios.filter(p => p.id !== id);
-    if (!this.savePortfolios(filtered)) throw this._writeRefused();
-
-    // Also delete related holdings and transactions. The ids have to be read
-    // before the holdings are saved without them: this used to save first and
-    // then look for holdings that were already gone, so holdingIds was always
-    // empty and every transaction of a deleted portfolio stayed in storage
-    // for ever.
-    const holdingIds = this.getHoldings()
-      .filter(h => h.portfolioId === id)
-      .map(h => h.id);
-
-    // Each list written only when it changes, as deleteHolding; the ones
-    // written are put back when a later one is refused.
-    const written = [this.KEYS.PORTFOLIOS];
+    // The ids are read before anything is written.
     const allHoldings = this.getHoldings();
+    const holdingIds = allHoldings.filter(h => h.portfolioId === id).map(h => h.id);
     const holdings = allHoldings.filter(h => h.portfolioId !== id);
     const allTransactions = this.getTransactions();
     const transactions = allTransactions.filter(t => !holdingIds.includes(t.holdingId));
-    let stopped = false;
-    if (holdings.length !== allHoldings.length) {
-      if (this.saveHoldings(holdings)) written.push(this.KEYS.HOLDINGS);
-      else stopped = true;
+    const nTx = allTransactions.length - transactions.length;
+    const nPos = allHoldings.length - holdings.length;
+    // Each list written only when it changes.
+    const steps = [];
+    if (nTx) steps.push({ key: T, save: () => this.saveTransactions(transactions) });
+    if (nPos) steps.push({ key: H, save: () => this.saveHoldings(holdings) });
+    steps.push({ key: P, save: () => this.savePortfolios(filtered) });
+    const failed = this._writeInOrder(steps);
+    if (failed) {
+      throw this._stopped(failed, kept => (kept.includes(H)
+        ? `Its ${nPos} position${nPos === 1 ? ' was' : 's were'} deleted${nTx ? ' with their trades' : ''}, but the portfolio itself could not be: `
+        : `The trades of its positions (${nTx}) were deleted, but the positions and the portfolio could not be: `));
     }
-    if (!stopped && transactions.length !== allTransactions.length && !this.saveTransactions(transactions)) stopped = true;
-    if (stopped) {
-      const refused = this._writeRefused();
-      this._putBack(before, written);
-      throw refused;
-    }
-
     return true;
   },
 
@@ -352,17 +415,8 @@ window.PortfolioStorage = {
     return this.getHoldingsByPortfolio(portfolioId).find(h => this.listingKey(h.symbol) === key) || null;
   },
 
-  createHolding(data) {
-    this._refuseBlocked();
-    // Only into a portfolio that exists now, in storage -- not in this tab's
-    // memory of it.
-    if (!data.portfolioId || !this.getPortfolios().some(p => p.id === data.portfolioId)) {
-      throw new PortfolioStorageError('portfolio-gone', 'This portfolio was deleted (perhaps in another tab). Reload the page and pick a portfolio.');
-    }
-    // A name the portfolio already holds is not a new position.
-    this._freeLimit('positions', () => (this.holdingOf(data.portfolioId, data.symbol)
-      ? 0 : this.getHoldingsByPortfolio(data.portfolioId).length + 1));
-    const holding = {
+  _holdingRecord(data) {
+    return {
       id: this.generateId(),
       portfolioId: data.portfolioId,
       type: data.type || 'stock', // stock, etf, crypto, forex, bond, manual
@@ -375,6 +429,36 @@ window.PortfolioStorage = {
       notes: data.notes || '',
       createdAt: this.getTimestamp()
     };
+  },
+
+  // New positions of one portfolio in one write (an import's): the records,
+  // or a throw as createHolding throws.
+  createHoldings(list) {
+    this._refuseBlocked();
+    const items = Array.isArray(list) ? list : [];
+    if (!items.length) return [];
+    const pid = items[0].portfolioId;
+    if (!pid || !this.getPortfolios().some(p => p.id === pid)) {
+      throw new PortfolioStorageError('portfolio-gone', 'This portfolio was deleted (perhaps in another tab). Reload the page and pick a portfolio.');
+    }
+    const fresh = items.filter(d => !this.holdingOf(pid, d.symbol));
+    this._freeLimit('positions', () => (fresh.length ? this.getHoldingsByPortfolio(pid).length + fresh.length : 0));
+    const made = items.map(d => this._holdingRecord({ ...d, portfolioId: pid }));
+    if (!this.saveHoldings(this.getHoldings().concat(made))) throw this._writeRefused();
+    return made;
+  },
+
+  createHolding(data) {
+    this._refuseBlocked();
+    // Only into a portfolio that exists now, in storage -- not in this tab's
+    // memory of it.
+    if (!data.portfolioId || !this.getPortfolios().some(p => p.id === data.portfolioId)) {
+      throw new PortfolioStorageError('portfolio-gone', 'This portfolio was deleted (perhaps in another tab). Reload the page and pick a portfolio.');
+    }
+    // A name the portfolio already holds is not a new position.
+    this._freeLimit('positions', () => (this.holdingOf(data.portfolioId, data.symbol)
+      ? 0 : this.getHoldingsByPortfolio(data.portfolioId).length + 1));
+    const holding = this._holdingRecord(data);
 
     const holdings = this.getHoldings();
     holdings.push(holding);
@@ -396,23 +480,47 @@ window.PortfolioStorage = {
   // A refused write is said and the position stays, its trades with it: Edit
   // -> Delete Position closed in silence over a write the browser refused,
   // and the position was still there after a reload.
+  // Its trades first, then the position (_writeInOrder): the position went
+  // first, and a refusal of the rest with its put-back refused left the
+  // trades without it -- shown on screen, gone after a reload. Now the most that can be left is the position without
+  // its trades, said, and shown.
   deleteHolding(id) {
-    const before = this._listsBefore();
+    const H = this.KEYS.HOLDINGS, T = this.KEYS.TRANSACTIONS;
+    this._refuseUnreadableAll([H, T]);
     const holdings = this.getHoldings();
     const filtered = holdings.filter(h => h.id !== id);
-    if (!this.saveHoldings(filtered)) throw this._writeRefused();
-
-    // Also delete related transactions. Written only when there are some: a
-    // position just made and taken back (a refused import) has none, and
-    // rewriting the list unchanged could only fail it.
+    // The trades written only when there are some: a position just made and
+    // taken back (a refused import) has none, and rewriting the list
+    // unchanged could only fail it.
     const all = this.getTransactions();
     const transactions = all.filter(t => t.holdingId !== id);
-    if (transactions.length !== all.length && !this.saveTransactions(transactions)) {
-      const refused = this._writeRefused();
-      this._putBack(before, [this.KEYS.HOLDINGS]);
-      throw refused;
+    const n = all.length - transactions.length;
+    const steps = [];
+    if (n) steps.push({ key: T, save: () => this.saveTransactions(transactions) });
+    steps.push({ key: H, save: () => this.saveHoldings(filtered) });
+    const failed = this._writeInOrder(steps);
+    if (failed) {
+      throw this._stopped(failed, () => `Its ${n} trade${n === 1 ? ' was' : 's were'} deleted, but the position itself could not be: `);
     }
     return true;
+  },
+
+  // Positions the change just made, taken back in one write (a refused
+  // import's): true, or the refusal (_stopped) naming them when the browser
+  // refused that as well -- they stay, without trades, and are shown.
+  takeBackHoldings(ids) {
+    const gone = new Set(ids || []);
+    if (!gone.size) return true;
+    const holdings = this.getHoldings();
+    const named = holdings.filter(h => gone.has(h.id)).map(h => String(h.symbol || h.name || '').trim()).filter(Boolean);
+    if (!named.length && !holdings.some(h => gone.has(h.id))) return true;
+    const failed = this._writeInOrder([{ key: this.KEYS.HOLDINGS, save: () => this.saveHoldings(holdings.filter(h => !gone.has(h.id))) }]);
+    if (!failed) return true;
+    const n = gone.size;
+    // Nothing was written to put back: kept is empty, and the positions stay
+    // as they were made. Said as that.
+    return this._stopped({ refused: failed.refused, kept: [this.KEYS.HOLDINGS] },
+      () => `No trades were imported, and the ${n} new position${n === 1 ? '' : 's'} the import made (${named.join(', ')}) could not be taken back, so ${n === 1 ? 'it stays' : 'they stay'} without trades: `);
   },
 
   getHoldingById(id) {
@@ -866,6 +974,12 @@ window.PortfolioStorage = {
   RECOVERED_NAME: 'Recovered positions',
 
   repairOrphans() {
+    // Nothing is judged from a list that cannot be read: an unreadable
+    // portfolios list read as none, and every position as one without a
+    // portfolio. The tracker shows the recovery panel for it instead.
+    if (this._anyUnreadable([this.KEYS.PORTFOLIOS, this.KEYS.HOLDINGS, this.KEYS.TRANSACTIONS])) {
+      return { restored: [], reattached: 0, recreated: [], merged: 0 };
+    }
     const portfolios = this.getPortfolios();
     const holdings = this.getHoldings();
     const known = new Set(portfolios.map(p => p.id));
@@ -1183,10 +1297,50 @@ window.PortfolioStorage = {
     } finally { this._overwriting = false; }
     if (!ok) {
       // Put back what was there; a half-restored set is worse than none.
-      Object.entries(before.keys).forEach(([k, v]) => { try { localStorage.setItem(k, v); } catch (e) { /* nothing more to do */ } });
-      throw this._writeRefused();
+      // A put-back the browser refuses as well is said, and the screen reads
+      // the lists again: no order of three lists that all change can keep
+      // every trade with its position here, so what is left without one is
+      // shown, and offered for clean-up, by the tracker (orphanTrades).
+      // It was refused in silence.
+      // Only what the restore changed: a list it never got to write is as it
+      // was, and asking to write it again could only be refused.
+      let left = 0;
+      Object.entries(before.keys).forEach(([k, v]) => {
+        let now;
+        try { now = localStorage.getItem(k); } catch (e) { now = undefined; }
+        if (now === v) return;
+        try { localStorage.setItem(k, v); } catch (e) { left++; }
+      });
+      const refused = this._writeRefused();
+      if (!left) throw refused;
+      throw this._stopped({ refused, kept: [this.KEYS.TRANSACTIONS] },
+        () => 'The backup was only partly restored, and the data from before it could not all be put back: ');
     }
     return { portfolios: portfolios.length, holdings: holdings.length, transactions: transactions.length };
+  },
+
+  // Trades whose position is not stored: what a change the browser refused
+  // part way, with its put-back refused too, can leave (a restore). No
+  // screen shows them; the tracker names them and offers to delete them.
+  // None while either list cannot be read: an unreadable list reads as
+  // empty, and every trade looked like one of no position.
+  orphanTrades() {
+    if (this._anyUnreadable([this.KEYS.HOLDINGS, this.KEYS.TRANSACTIONS])) return [];
+    const ids = new Set(this.getHoldings().map(h => h.id));
+    return this.getTransactions().filter(t => !ids.has(t.holdingId));
+  },
+  // Deletes them; throws the refusal (as every write) when the browser
+  // refuses it. Returns how many went.
+  deleteOrphanTrades() {
+    // The positions list unreadable read as no positions, and "Delete it"
+    // for one orphan deleted every trade, the valid ones too.
+    this._refuseUnreadableAll([this.KEYS.HOLDINGS, this.KEYS.TRANSACTIONS]);
+    const ids = new Set(this.getHoldings().map(h => h.id));
+    const all = this.getTransactions();
+    const kept = all.filter(t => ids.has(t.holdingId));
+    if (kept.length === all.length) return 0;
+    if (!this.saveTransactions(kept)) throw this._writeRefused();
+    return all.length - kept.length;
   },
 
   importAll(data) {
@@ -1292,6 +1446,17 @@ window.PortfolioStorage = {
   },
   UNREADABLE_BACKUP_KEY,
 
+  // Every change that decides what to delete or move from a list it reads,
+  // not only from one it writes: a list that cannot be read reads as empty,
+  // and the decision would be made on nothing. Refused with
+  // why (UNREADABLE_MESSAGE), before anything is written.
+  _refuseUnreadableAll(keys) {
+    for (const k of keys) this._refuseUnreadable(k);
+  },
+  _anyUnreadable(keys) {
+    const bad = this.unreadableKeys();
+    return keys.some(k => bad.indexOf(k) !== -1);
+  },
   _refuseUnreadable(key) {
     this._refuseBlocked();
     if (this._overwriting) return;
