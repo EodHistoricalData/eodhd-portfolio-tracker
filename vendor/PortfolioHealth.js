@@ -50,6 +50,24 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
   // settles -- a failed one too, for the line that names it.
   // `gone`: the card closed, for its own Try again's look-up.
   const goneRef = React.useRef(false);
+  // Its requests of the fundamentals, for the request model's guard: the
+  // card closed gives up what it still has out (PortfolioRiskRequests.cede).
+  const requestsRef = React.useRef(null);
+  if (!requestsRef.current && window.PortfolioRiskRequests) requestsRef.current = window.PortfolioRiskRequests.mount();
+  const owner = requestsRef.current ? requestsRef.current.owner : undefined;
+  if (requestsRef.current) requestsRef.current.setCurrent(String(apiKey), String(apiKey));
+  React.useEffect(() => () => { if (requestsRef.current) requestsRef.current.dispose(); }, []);
+  // The key's epoch (the guard): a look-up started under another key, or by
+  // a card that has closed, asks nothing more and writes nothing -- the
+  // earnings went on asking the last key's positions (the explorer).
+  const keyRef = React.useRef({ key: apiKey, epoch: 0 });
+  if (keyRef.current.key !== apiKey) keyRef.current = { key: apiKey, epoch: keyRef.current.epoch + 1 };
+  const liveFor = (epoch) => () => !goneRef.current && keyRef.current.epoch === epoch;
+  // A position the card still holds: a request for one it no longer holds
+  // is wanted by nobody here.
+  const holdingsRef = React.useRef(holdings);
+  holdingsRef.current = holdings;
+  const holdsNow = (sym) => (holdingsRef.current || []).some(h => h && h.symbol === sym);
   React.useEffect(() => {
     goneRef.current = false;
     const on = () => { if (!goneRef.current) sectorsArrived(n => n + 1); };
@@ -164,13 +182,19 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
     })
   };
 
+  // Another tab, key or set of positions: the last earnings run stops (it
+  // asked Q's positions on after the card had moved to P -- the explorer),
+  // and the earnings are looked up again for these if they are open.
+  const holdingsKey = holdings.map(h => (h && h.symbol) || '').join(',');
   React.useEffect(() => {
+    earningsRunRef.current += 1;
     if (activeTab === 'insider') {
       loadInsiderActivity();
     } else if (activeTab === 'earnings') {
       loadEarningsCalendar();
     }
-  }, [activeTab]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, apiKey, holdingsKey]);
 
   const loadInsiderActivity = async () => {
     const FLW = window.FreeLimitWalls;
@@ -238,18 +262,37 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
     setLoading(false);
   };
 
-  const loadEarningsCalendar = async () => {
+  // `own`: its line's Try again, which asks a symbol whose fundamentals the
+  // page keeps refused (401, 402, 403); a load does not. A Set: the symbols its line is about -- those whose
+  // failure it says -- and no other.
+  const earningsSaidRef = React.useRef([]);
+  const earningsRunRef = React.useRef(0);
+  const loadEarningsCalendar = async (own) => {
+    const run = ++earningsRunRef.current;
+    const keyLive = liveFor(keyRef.current.epoch);
+    // The run goes on, and draws, while it is the card's latest; its answers
+    // are the card's while it holds the position.
+    const live = () => keyLive() && run === earningsRunRef.current;
     setLoading(true);
     const earningsList = [];
     const earningsFails = [];
+    const said = [];
+    const RLWh = window.RateLimitWait;
 
     for (const holding of holdings) {
+      if (!live()) return;
       if (holding.symbol && holding.type === 'stock') {
         try {
-          const fundamentals = await (window.PortfolioFundamentals ? window.PortfolioFundamentals.get(apiKey, holding.symbol) : window.EODHD_API.getFundamentals(apiKey, holding.symbol));
-          // Not come back: what the request threw, for the line's reason.
+          const asked = window.PortfolioFundamentals ? window.PortfolioFundamentals.get(apiKey, holding.symbol, { own: own instanceof Set && own.has(holding.symbol), live: () => keyLive() && holdsNow(holding.symbol), owner }) : window.EODHD_API.getFundamentals(apiKey, holding.symbol);
+          const fundamentals = await asked;
+          // Not come back: what its own request threw, for the line's reason.
           const PF = window.PortfolioFundamentals;
-          if (fundamentals == null && PF && PF.failureOf && PF.failureOf(apiKey, holding.symbol)) earningsFails.push(PF.failureOf(apiKey, holding.symbol));
+          if (fundamentals == null && PF && PF.failureOf && PF.failureOf(apiKey, holding.symbol, asked)) {
+            const why = PF.failureOf(apiKey, holding.symbol, asked);
+            earningsFails.push(why);
+            const f = RLWh.failure(why);
+            if (RLWh.outage(why) || (!f.limited && !f.unreadable && (f.status === 401 || f.status === 402))) said.push(holding.symbol);
+          }
           const earnings = fundamentals?.Earnings?.History;
 
           if (earnings) {
@@ -296,11 +339,21 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
     });
 
     setEarningsData(earningsList);
-    setEarningsFail(window.RateLimitWait.outage(earningsFails));
+    if (!live()) return;
+    // An outage, else the key's or the day's refusal (401, 402): said with
+    // its reason and Try again in the terminal, pointing at a host's panel.
+    // It read "No earnings data available".
+    const keyOrDay = earningsFails.map(e => RLWh.failure(e)).find(f => !f.limited && !f.unreadable && (f.status === 401 || f.status === 402));
+    earningsSaidRef.current = said;
+    setEarningsFail(RLWh.outage(earningsFails) || keyOrDay || null);
     setLoading(false);
   };
 
   const scoreState = window.PortfolioHealthScore.state(positions, pricesLoading);
+  // No price for the key or the day under a host's own panel: the line says
+  // only that, pointing at it (Calc.pricesUnderPanel).
+  const pricesPanel = scoreState === 'unpriced' && Boolean(window.PortfolioCalculations && window.PortfolioCalculations.pricesUnderPanel
+    && window.PortfolioCalculations.pricesUnderPanel(positions));
   // A position's type, currency and sector are known without its price:
   // the counts and the checks of what is held -- asset types, holdings,
   // currencies, sectors, and the advice drawn from them -- are of every
@@ -385,17 +438,30 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
   // Try again, as By Sector names them. "? Sectors" said nothing. Asked again here only by Try again, or once by itself
   // after the limit's wait (FailNote).
   const PF = window.PortfolioFundamentals;
-  const [sectorsAsking, setSectorsAsking] = React.useState(false);
+  // The key's epoch whose sector look-up is out, or null: it belongs to that
+  // key -- a Try again under key 1 answered after the switch to key 2 left
+  // the flag up for good and hid key 2's line and Try again.
+  const [sectorsAskingAt, setSectorsAskingAt] = React.useState(null);
+  const sectorsAsking = sectorsAskingAt != null && sectorsAskingAt === keyRef.current.epoch;
   const sectorless = scored.filter(h => h && h.symbol && (h.type || 'stock') === 'stock'
     && !/\.(FOREX|CC|INDX|GBOND|COMM|MONEY)$/i.test(h.symbol) && !storedSector(h));
-  const sectorsMissed = !sectorsAsking && apiKey && PF && PF.missed && sectorless.length ? PF.missed(apiKey, sectorless.map(h => h.symbol)) : null;
+  // The key's or the day's refusal too, said, and asked again only by Try
+  // again.
+  const sectorsMissed = !sectorsAsking && apiKey && PF && PF.missed && sectorless.length ? PF.missed(apiKey, sectorless.map(h => h.symbol), { refusals: true }) : null;
   // Stops between positions once the card is gone: it asked on for every
   // position after Health had closed.
-  const askSectorsAgain = () => {
+  // `own`: pressed -- a Set of the symbols its line names, asked even if
+  // refused, and no other -- not the reload
+  // after a wait.
+  const askSectorsAgain = (own) => {
     if (!PF || !PF.learnSectors || sectorsAsking) return;
-    setSectorsAsking(true);
-    Promise.resolve(PF.learnSectors(apiKey, sectorless, null, () => goneRef.current)).catch(() => null)
-      .then(() => { if (!goneRef.current) setSectorsAsking(false); });
+    const live = liveFor(keyRef.current.epoch);
+    const held = holdings.map(h => (h && h.symbol) || '').join(',');
+    const same = () => live() && (holdingsRef.current || []).map(h => (h && h.symbol) || '').join(',') === held;
+    const epoch = keyRef.current.epoch;
+    setSectorsAskingAt(epoch);
+    Promise.resolve(PF.learnSectors(apiKey, sectorless, null, () => !same(), { own: own instanceof Set ? own : null, liveOf: sym => live() && holdsNow(sym), owner })).catch(() => null)
+      .then(() => { if (!goneRef.current) setSectorsAskingAt(at => (at === epoch ? null : at)); });
   };
 
   // Status colours as text on this card: red "Fair" and the warnings read
@@ -501,15 +567,16 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
             <div style={{ ...styles.card, textAlign: 'center', padding: 24 }}>
               <h3 style={{ ...styles.muted, marginBottom: 16, marginTop: 0 }}>Portfolio Health Score</h3>
               {scoreState !== 'ok' && (
-                <p style={{ margin: 0, padding: '8px 0', fontSize: 14, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+                <p data-own-fail={scoreState === 'unpriced' ? 'quotes' : undefined} data-see-panel={scoreState === 'unpriced' && pricesPanel ? 'true' : undefined} style={{ margin: 0, padding: '8px 0', fontSize: 14, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
                   {/* The words are the live region; the button counts the
                       wait every second and stays outside it. */}
                   {/* And why none came, when that is known: a rate that did
                       not load, the quotes' failure. */}
                   <span role="status">{scoreState === 'loading' ? 'Loading prices…'
+                    : scoreState === 'unpriced' && pricesPanel ? 'No score yet — it needs current prices. ' + window.PortfolioCalculations.pricesPanelLine(positions, false)
                     : scoreState === 'unpriced' ? 'No score yet — it needs current prices, and none came back for these positions.' + ((() => { const w = window.PortfolioCalculations && window.PortfolioCalculations.unpricedWhy ? window.PortfolioCalculations.unpricedWhy(positions, baseCurrency || 'USD') : ''; return w ? ' ' + w : ''; })())
                     : 'No score yet — these positions have no shares. Add your purchases to get a score.'}</span>
-                  {scoreState === 'unpriced' && onRetryPrices && (
+                  {scoreState === 'unpriced' && onRetryPrices && !pricesPanel && (
                     <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />
                   )}
                 </p>
@@ -658,8 +725,8 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
               </div>
             </div>
             {sectorsMissed && (
-              <window.RateLimitWait.FailNote panel="health-sectors" ownFail="fundamentals" failure={sectorsMissed.failure} text={PF.missedText(sectorsMissed)}
-                onRetry={askSectorsAgain} isDark={isDark}
+              <window.RateLimitWait.FailNote panel="health-sectors" ownFail="fundamentals" sayPanel what="Fundamentals" failure={sectorsMissed.failure} text={PF.missedText(sectorsMissed)}
+                onRetry={() => askSectorsAgain(new Set(sectorsMissed.symbols))} onReload={() => askSectorsAgain()} isDark={isDark}
                 style={{ margin: '8px 0 0', fontSize: 12, ...styles.muted }} buttonStyle={{ fontFamily: "'Sora', sans-serif" }} />
             )}
             {/* The counts are of every position; what the unpriced ones are
@@ -719,7 +786,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
           <div style={styles.card}>
             <h3 style={{ fontWeight: 600, marginBottom: 12, marginTop: 0, color: isDark ? C3.textDark : C3.textLightTheme }}>Recent Insider Transactions</h3>
             {!loading && insiderRefusal && window.PlanNotice && window.PlanNotice.RefusalCard
-              && React.createElement(window.PlanNotice.RefusalCard, { refusal: insiderRefusal, isDark })}
+              && React.createElement(window.PlanNotice.RefusalCard, { refusal: insiderRefusal, isDark, ownFail: 'insider' })}
             {!loading && !insiderRefusal && insiderFail && React.createElement(window.RateLimitWait.FailNote, {
               what: insiderFailFor.length && Calc && Calc.namesList ? `The insider feed for ${Calc.namesList(insiderFailFor)}`
                 : insiderData.length ? 'The insider feed for some holdings' : 'The insider feed',
@@ -781,7 +848,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
                 <p style={{ color: isDark ? C3.textMutedDark : C3.textMutedLight, marginTop: 12 }}>No recent insider transactions</p>
                 <p style={{ ...styles.muted, marginTop: 4 }}>
                   {window.Entitlement && window.Entitlement.explained && window.Entitlement.explained()
-                    ? 'The insider feed did not answer for this key — see the panel above.'
+                    ? <span data-own-fail="insider" data-see-panel="true">{'The insider feed did not answer for this key — see the panel above.'}</span>
                     : 'No insider transactions were reported for these holdings. The feed covers US stocks.'}
                 </p>
               </div>
@@ -795,7 +862,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
             <h3 style={{ fontWeight: 600, marginBottom: 12, marginTop: 0, color: isDark ? C3.textDark : C3.textLightTheme }}>Earnings Calendar</h3>
             {!loading && earningsFail && React.createElement(window.RateLimitWait.FailNote, {
               what: earningsData.length ? 'The earnings of some holdings' : 'The earnings',
-              failure: earningsFail, onRetry: loadEarningsCalendar, isDark, panel: 'health-earnings', ownFail: 'fundamentals',
+              failure: earningsFail, onRetry: () => loadEarningsCalendar(new Set(earningsSaidRef.current)), onReload: () => loadEarningsCalendar(), isDark, panel: 'health-earnings', ownFail: 'fundamentals', sayPanel: true,
               style: { marginBottom: 12 },
             })}
             {loading ? (
@@ -877,7 +944,7 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
                 <p style={{ color: isDark ? C3.textMutedDark : C3.textMutedLight, marginTop: 12 }}>No earnings data available</p>
                 <p style={{ ...styles.muted, marginTop: 4 }}>
                   {window.Entitlement && window.Entitlement.explained && window.Entitlement.explained()
-                    ? 'The earnings feed did not answer for this key — see the panel above.'
+                    ? <span data-own-fail="fundamentals" data-see-panel="true">{'The earnings feed did not answer for this key — see the panel above.'}</span>
                     : 'No upcoming earnings for these holdings. The feed covers stocks and ETFs.'}
                 </p>
               </div>

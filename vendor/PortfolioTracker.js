@@ -601,7 +601,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
       // No portfolio selected is no positions on screen -- not the last
       // portfolio's, already deleted.
       priceSeqRef.current++;
-      priceStoreRef.current = { key: null, quotes: {}, eod: {}, rates: {}, rateFails: {}, priceFailBy: {}, noRecord: {}, draw: null, at: null };
+      priceStoreRef.current = { key: null, quotes: {}, eod: {}, rates: {}, rateFails: {}, rateRefused: {}, priceFailBy: {}, priceRefusedBy: {}, noRecord: {}, notAvailable: {}, draw: null, at: null };
       setHoldings([]);
       setHoldingsData({});
     }
@@ -649,7 +649,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   // dropped the first request's answer when it came: prices stayed N/A.
   // An answer is kept if it is newer than the one
   // held, a failure never takes a price away, and the latest load draws.
-  const priceStoreRef = React.useRef({ key: null, quotes: {}, eod: {}, rates: {}, rateFails: {}, priceFailBy: {}, noRecord: {}, draw: null, at: null });
+  const priceStoreRef = React.useRef({ key: null, quotes: {}, eod: {}, rates: {}, rateFails: {}, rateRefused: {}, priceFailBy: {}, priceRefusedBy: {}, noRecord: {}, notAvailable: {}, draw: null, at: null });
   // The templates dialog takes the focus when it opens and closes on Escape
   // wherever the focus is: opened with the mouse, the focus stayed on the
   // page behind and Escape did nothing.
@@ -737,7 +737,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     // One store per portfolio, currency and key; another starts afresh.
     const storeKey = `${activePortfolio?.id || activePortfolioId || ''}|${baseCurrency}|${apiKey || ''}`;
     if (priceStoreRef.current.key !== storeKey) {
-      priceStoreRef.current = { key: storeKey, quotes: {}, eod: {}, rates: {}, rateFails: {}, priceFailBy: {}, noRecord: {}, draw: null, at: null };
+      priceStoreRef.current = { key: storeKey, quotes: {}, eod: {}, rates: {}, rateFails: {}, rateRefused: {}, priceFailBy: {}, priceRefusedBy: {}, noRecord: {}, notAvailable: {}, draw: null, at: null };
     }
     const store = priceStoreRef.current;
     // Until this load draws, a late answer waits in the store for it.
@@ -745,12 +745,16 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     // Asked together with the quotes, not before them: both share the wait.
     const ratesAsked = Promise.resolve().then(() => loadForexRates(holdingsList, baseCurrency, current));
     const takeRates = (r) => {
-      Object.entries(r || {}).forEach(([c, v]) => { if (Calc.toRate(v) != null) { store.rates[c] = v; delete store.rateFails[c]; } });
+      Object.entries(r || {}).forEach(([c, v]) => { if (Calc.toRate(v) != null) { store.rates[c] = v; delete store.rateFails[c]; delete store.rateRefused[c]; } });
       // A rate that did not come, and why (the limit, EODHD's error, a
       // dropped connection, an answer that could not be read): the footer
       // said only "1 without a price".
+      // A refusal of the key or the day apart, as the quotes' (priceRefusedBy).
       Object.entries((r && r._fails) || {}).forEach(([c, list]) => {
-        if (store.rates[c] == null) store.rateFails[c] = RLW.outage(list);
+        if (store.rates[c] != null) return;
+        store.rateFails[c] = RLW.outage(list);
+        const refused = [].concat(list || []).map(e => RLW.failure(e)).find(f => !f.limited && !f.unreadable && (f.status === 401 || f.status === 402 || f.status === 403));
+        if (store.rateFails[c] || !refused) delete store.rateRefused[c]; else store.rateRefused[c] = refused;
       });
     };
     const rateOf = (c) => (c === baseCurrency ? 1 : store.rates[c]);
@@ -775,7 +779,12 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     // own request below.
     const quoted = store.quotes;
     const priced = (q) => asPrice(q && q.close) != null || asPrice(q && q.previousClose) != null;
-    const takeQuote = (code, q) => {
+    // `kept`: the failure a quote came with -- the last price the client
+    // keeps at the limit (getRealTimeData, the batch's odd symbol). It is
+    // that price, not a current one: "Prices as of" does not move for it, and
+    // the footer says whose price is kept, from when, and why. An old
+    // M&M.NSE price read as current under "Prices as of <now>". A fresh answer for the symbol ends it.
+    const takeQuote = (code, q, kept) => {
       if (!q || typeof q !== 'object') return false;
       const k = String(code).toUpperCase();
       const had = quoted[k];
@@ -787,7 +796,13 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
         if (priced(had) && !priced(q)) return true;
       }
       quoted[k] = q;
-      if (priced(q)) store.at = new Date();
+      if (kept) {
+        const ts = Number(q.timestamp);
+        store.kept[k] = { failure: RLW.failure(kept), at: Number.isFinite(ts) && ts > 0 ? new Date(ts < 4e10 ? ts * 1000 : ts) : null };
+      } else {
+        delete store.kept[k];
+        if (priced(q)) store.at = new Date();
+      }
       return true;
     };
     const quoteOf = (sym) => quoted[String(sym).toUpperCase()] || null;
@@ -801,7 +816,13 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     // batch's 500 stayed after the single requests had answered, and was
     // blamed on a ticker that answered "no data".
     const failBy = {};
+    const askedAlone = new Set();
     store.noRecord = {};
+    // A kept price stays kept until a fresh answer for it (takeQuote):
+    // the next load asks it again. Reset here, the repeat after the wait
+    // found the old price "quoted", asked nothing, and dropped its stale
+    // mark -- "Prices as of" moved to now.
+    store.kept = store.kept || {};
     const symbols = [...new Set(holdingsList.filter(h => h.symbol && h.type !== 'manual').map(h => h.symbol))];
     if (symbols.length > 1 && window.EODHD_API.getBatchRealTime) {
       for (let i = 0; i < symbols.length; i += 50) {
@@ -810,13 +831,17 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
         const asked = Promise.resolve().then(() => window.EODHD_API.getBatchRealTime(apiKey, symbols.slice(i, i + 50)));
         const got = await within(asked, left());
         if (got.done) {
-          Object.entries(got.value || {}).forEach(([code, q]) => { if (takeQuote(code, q)) answered++; });
+          const keptBy = (got.value && got.value._failedBy) || {};
+          Object.entries(got.value || {}).forEach(([code, q]) => { if (takeQuote(code, q, keptBy[code] || null)) answered++; });
           if (!answered && got.value && got.value._failed) {
             firstFail = firstFail || got.value._failed;
             symbols.slice(i, i + 50).forEach((s) => { failBy[s] = got.value._failed; });
           }
+          // A symbol asked on its own inside the batch (M&M.NSE): its own
+          // failure, and it is not asked a second time below.
+          Object.entries((got.value && got.value._failedBy) || {}).forEach(([s, f]) => { failBy[s] = f; askedAlone.add(s); });
         } else {
-          late.push(asked.then(batch => { Object.entries(batch || {}).forEach(([code, q]) => takeQuote(code, q)); }, () => {}));
+          late.push(asked.then(batch => { Object.entries(batch || {}).forEach(([code, q]) => takeQuote(code, q, (batch && batch._failedBy && batch._failedBy[code]) || null)); }, () => {}));
         }
         if (heard.stop() && !answered) quotesRefused = true;
         // The batch hung: EODHD is not answering, and asking symbol by
@@ -833,7 +858,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     // The symbols the batch left out are asked for together, not one after
     // another: each could wait its own timeout.
     if (!quotesRefused) {
-      const missing = symbols.filter(sym => !quoteOf(sym));
+      const missing = symbols.filter(sym => (!quoteOf(sym) || store.kept[String(sym).toUpperCase()]) && !askedAlone.has(sym));
       await Promise.all(missing.map(async sym => {
         // With its status, so a failure can be named; inside the limit's
         // wait the last price stays, as the client keeps it.
@@ -846,10 +871,10 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
           return e && e.rateLimited && A && A._lastQuote && A._lastQuote.get ? (A._lastQuote.get(sym) || null) : null;
         });
         // An answer of its own clears what the batch failed with.
-        const answeredNow = () => { if (!threw) { delete failBy[sym]; delete store.priceFailBy[sym]; } };
+        const answeredNow = () => { if (!threw) { delete failBy[sym]; delete store.priceFailBy[sym]; delete store.priceRefusedBy[sym]; } };
         const got = await within(asked, left());
-        if (got.done) { answeredNow(); takeQuote(sym, got.value); }
-        else late.push(asked.then(q => { answeredNow(); takeQuote(sym, q); }, () => {}));
+        if (got.done) { answeredNow(); takeQuote(sym, got.value, threw ? failBy[sym] : null); }
+        else late.push(asked.then(q => { answeredNow(); takeQuote(sym, q, threw ? failBy[sym] : null); }, () => {}));
       }));
       if (!current()) return;
     }
@@ -908,8 +933,23 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     // only (the limit, EODHD's error, no answer, unreadable); a 404 is a
     // code the feed does not know.
     // By symbol, each its own (failBy).
+    // A refusal of the key or the day (401, 402) apart: the terminal's lines
+    // say nothing more for it, and under a host's own panel they point at it
+    // (Calc.pricesUnderPanel).
+    // A symbol the backend refuses outright (400 invalid_parameter) is not
+    // available: no failure, no Try again (EODHD_API.notAvailable).
     store.priceFailBy = {};
-    Object.keys(failBy).forEach((s) => { const f = RLW.outage(failBy[s]); if (f) store.priceFailBy[s] = f; });
+    store.priceRefusedBy = {};
+    store.notAvailable = {};
+    Object.keys(failBy).forEach((s) => {
+      if (window.EODHD_API.notAvailable && window.EODHD_API.notAvailable(failBy[s])) { store.notAvailable[s] = true; return; }
+      const f = RLW.outage(failBy[s]);
+      if (f) { store.priceFailBy[s] = f; return; }
+      const r = RLW.failure(failBy[s]);
+      // The plan's (403) too: Risk said nothing at the quotes' 403 (the open
+      // apps' failure matrix), and no line said why.
+      if (!r.limited && !r.unreadable && (r.status === 401 || r.status === 402 || r.status === 403)) store.priceRefusedBy[s] = r;
+    });
 
     const gotRates = await within(ratesAsked, left());
     if (gotRates.done) takeRates(gotRates.value);
@@ -933,6 +973,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
             priceUnavailable: true, fxUnavailable: true,
             // Why the rate did not come, when it failed (Calc.unpricedWhy).
             fxFail: store.rateFails[holdingCurrency] || null,
+            fxRefused: store.rateRefused[holdingCurrency] || null,
             symbol: holding.symbol,
             quantity: Calc.getHoldingQuantity(transactions),
             avgCostPerShare: basis.avgCostPerShare,
@@ -966,7 +1007,9 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
               ? new Date(ts < 4e10 ? ts * 1000 : ts).toISOString().slice(0, 10)
               : new Date().toISOString().slice(0, 10));
             const dayBought = Calc.getDayBought(transactions, quoteDay);
-            data[holding.id] = { ...(priceData || {}), ...holdingCalc, close, previousClose, dayKnown, dayBought, currency: holdingCurrency, exchangeRate };
+            data[holding.id] = { ...(priceData || {}), ...holdingCalc, close, previousClose, dayKnown, dayBought, currency: holdingCurrency, exchangeRate,
+              // The last price kept at the limit (takeQuote): its time and why.
+              priceKept: (!eod && store.kept && store.kept[String(holding.symbol).toUpperCase()]) || null };
           } else {
             // Unpriced, not worthless: quantity and cost are known, value is
             // not. The totals leave it out and say so, instead of booking it
@@ -977,7 +1020,9 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
               // Why its quote did not come, when it failed; or that it
               // answered with no price on record (Calc.unpricedWhy).
               priceFail: store.priceFailBy[holding.symbol] || null,
+              priceRefused: store.priceRefusedBy[holding.symbol] || null,
               noRecord: Boolean(store.noRecord[holding.symbol]),
+              notAvailable: Boolean(store.notAvailable && store.notAvailable[holding.symbol]),
               symbol: holding.symbol,
               quantity: Calc.getHoldingQuantity(transactions),
               avgCostPerShare: basis.avgCostPerShare,
@@ -1004,14 +1049,16 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
       // "Prices as of 12:03" over a list where no quote came back claimed a
       // price that was never had.
       // When the newest price came, not when this load ended.
-      setPricesUpdatedAt(Object.values(data).some(d => !d.priceUnavailable) ? (store.at || new Date()) : null);
+      // Kept prices alone: the newest of them, never now.
+      const keptAt = symbols.map(sym => store.kept && store.kept[String(sym).toUpperCase()]).filter(Boolean).map(x => x.at).filter(Boolean).sort((a, b) => b - a)[0] || null;
+      setPricesUpdatedAt(Object.values(data).some(d => !d.priceUnavailable) ? (store.at || keptAt || new Date()) : null);
     };
     store.draw = draw;
     draw();
     // The failure of a symbol still without a price, not of one that
     // answered since.
     const pricedNow = (sym) => priced(quoteOf(sym)) || Boolean(lastClose[sym] && (lastClose[sym].close != null || lastClose[sym].previousClose != null));
-    const stillFailing = symbols.find((sym) => failBy[sym] && !pricedNow(sym));
+    const stillFailing = symbols.find((sym) => failBy[sym] && !pricedNow(sym) && !store.notAvailable[sym]);
     setPricesFail(stillFailing ? RLW.failure(failBy[stillFailing]) : null);
     setLoading(false);
     RLW.endBusy('prices', busyToken);
@@ -1195,12 +1242,15 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   // stays up, busy, and a focus that was on it is put back after.
   // A quote's failure or a currency rate's: VOD.LSE quoted in GBX, with the
   // GBX/USD rate refused at the limit, stayed N/A after the wait -- only the
-  // quotes' failure armed this (on r26b). The quotes' first, else the
+  // quotes' failure armed this. The quotes' first, else the
   // first rate at the limit among the unpriced: one failure, one reload,
   // which asks for the quotes and the rates together.
   const rateStopped = openUnpriced.find(h => h.fxUnavailable && h.fxFail?.limited);
   const stoppedBy = pricesFail?.limited ? pricesFail : rateStopped ? rateStopped.fxFail : null;
-  const pricesStopped = !loading && unpricedCount > 0 ? stoppedBy : null;
+  // A kept price at the limit is asked again once the wait is over, as a
+  // missing one is.
+  const keptStop = holdingsWithData.find(h => h.priceKept && h.priceKept.failure && h.priceKept.failure.limited);
+  const pricesStopped = loading ? null : (unpricedCount > 0 && stoppedBy) || (keptStop ? keptStop.priceKept.failure : null);
   RLW.useReloadAfterWait(pricesStopped, () => {
     if (loading) return;
     const a = document.activeElement;
@@ -1210,24 +1260,45 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   // The reason, when the failure is known and it was not the limit.
   // Named as the other screens name them: EODHD's error (5xx), a dropped
   // connection (0), an answer that could not be read. A 404 is a code the
-  // feed does not know, and a refusal of the key or plan is said by its own
-  // panel: left as before.
+  // feed does not know. A refusal of the key or the day (401, 402) is said
+  // by the host's panel where there is one (pricesPanel), and here in the
+  // terminal: "No prices came back." gave no reason anywhere on screen.
+  // The plan's refusal (403): "current prices are not included in this plan."
+  // with no Try again.
   const pricesWhy = !pricesLimited && pricesFail && !pricesFail.limited
-    && (pricesFail.unreadable || pricesFail.status >= 500 || pricesFail.status === 0) ? RLW.failReason(pricesFail) : null;
+    && (pricesFail.unreadable || pricesFail.status >= 500 || pricesFail.status === 0 || pricesFail.status === 403
+      || ((pricesFail.status === 401 || pricesFail.status === 402) && !RLW.hostSaysKey(pricesFail)))
+    ? (pricesFail.status === 403 && !pricesFail.unreadable ? 'current prices are not included in this plan.' : RLW.failReason(pricesFail)) : null;
   // A position whose currency's rate did not load has no value either: the
   // rate is named, with its reason (Calc.unpricedWhy). The footer said "1
   // without a price" and nothing else. The quotes'
   // reason above is said only where a quote is what is missing.
-  const rateWhy = [Calc.unpricedWhy(openUnpriced, activePortfolio?.baseCurrency || 'USD', { ratesOnly: true }), Calc.noRecordWhy(openUnpriced)].filter(Boolean).join(' ');
+  const rateWhy = [Calc.unpricedWhy(openUnpriced, activePortfolio?.baseCurrency || 'USD', { ratesOnly: true }), Calc.noRecordWhy(openUnpriced), Calc.notAvailableWhy(openUnpriced)].filter(Boolean).join(' ');
   // A quote missing for a failure or with nothing known: not a rate, and not
-  // a ticker that answered with no price on record.
-  const quoteMissing = openUnpriced.some(h => !h.fxUnavailable && !h.noRecord);
+  // a ticker that answered with no price on record or that the backend
+  // refuses outright.
+  const quoteMissing = openUnpriced.some(h => !h.fxUnavailable && !h.noRecord && !h.notAvailable);
+  // Every position left without a value is one the backend refuses
+  // outright (M&M.NSE): asking again is the same refusal, so no Try again.
+  // Nor when every one is refused by the plan (403).
+  const pricesAskable = !(openUnpriced.length > 0 && openUnpriced.every(h => h.notAvailable || Calc.planRefused(h)));
+  // The last prices kept at the limit, said beside "Prices as of" (takeQuote).
+  const keptWords = Calc.keptLine(holdingsWithData);
+  const retryPricesOr = pricesAskable ? retryPrices : null;
+  // The AI tab's line, when nothing is valued: why (Calc.unpricedWhy).
+  const aiPricesWhy = Calc.unpricedWhy(openUnpriced, activePortfolio?.baseCurrency || 'USD');
   const withRateWhy = (words) => (rateWhy ? (words ? words.replace(/\.?$/, '.') + ' ' : '') + rateWhy : words);
-  const noPricesWords = !quoteMissing && rateWhy ? rateWhy
+  // Every unpriced position refused for the key or the day under a host's
+  // own panel: the line says only that the prices did not load and points
+  // at it, with no Try again (Calc.pricesUnderPanel).
+  const pricesPanel = !loading && unpricedCount > 0 && Calc.pricesUnderPanel(openUnpriced);
+  const noPricesWords = pricesPanel ? Calc.pricesPanelLine(openUnpriced, false)
+    : !quoteMissing && rateWhy ? rateWhy
     : withRateWhy(pricesLimited ? 'No prices came back: ' + RLW.REACHED : pricesWhy ? 'No prices came back: ' + pricesWhy : 'No prices came back.');
   // "· N without a price", and why: the quotes' reason where a quote is
   // missing, a rate's where a rate is.
-  const unpricedWords = withRateWhy(`${unpricedCount} without a price` + (quoteMissing && (pricesLimited || pricesWhy) ? ': ' + (pricesLimited ? RLW.REACHED : pricesWhy) : ''));
+  const unpricedWords = pricesPanel ? Calc.pricesPanelLine(openUnpriced, true)
+    : withRateWhy(`${unpricedCount} without a price` + (quoteMissing && (pricesLimited || pricesWhy) ? ': ' + (pricesLimited ? RLW.REACHED : pricesWhy) : ''));
   const totalValue = Calc.getTotalValue(pricedHoldings);
   const totalCost = Calc.getTotalCost(pricedHoldings);
   const { pnl, pnlPercent } = Calc.getTotalPnL(pricedHoldings);
@@ -1276,7 +1347,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   const leftOutLine = (tail, style) => (leftOutText ? (
     <p data-unpriced-why="true" data-own-fail="quotes" style={{ margin: '0 0 12px', fontSize: 12, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight, ...style }}>
       <span role="status">{leftOutText}{tail ? ' ' + tail : ''}</span>
-      <RLW.RetryButton busyKey="prices" isDark={isDark} onClick={retryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />
+      {pricesAskable && <RLW.RetryButton busyKey="prices" isDark={isDark} onClick={retryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />}
     </p>
   ) : null);
 
@@ -1830,12 +1901,12 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
               <span>{(() => {
                 const again = <RLW.RetryButton wait={rlWait} busyKey="prices" isDark={isDark} onClick={retryPrices} style={{ marginLeft: 6, padding: '3px 10px', borderRadius: 3, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: tc, fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />;
                 const words = loading ? 'Loading prices…'
-                  : pricesUpdatedAt ? 'Prices as of ' + pricesUpdatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' }) + (unpricedCount > 0 ? ` · ${unpricedWords}` : '')
+                  : pricesUpdatedAt ? 'Prices as of ' + pricesUpdatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' }) + (unpricedCount > 0 ? ` · ${unpricedWords}` : '') + (keptWords ? ` · ${keptWords}` : '')
                   : noneValued ? noPricesWords : '';
                 // The words are the live region; the held press's note counts
                 // every second and stays outside it.
-                const showAgain = (!loading || retrying) && (pricesUpdatedAt ? unpricedCount > 0 : noneValued);
-                return <><span role="status" aria-live="polite" data-pt-price-status="true" data-own-fail="quotes">{words}</span>{rlWait.note ? <span data-wait-note="true">{(words ? ' ' : '') + rlWait.note}</span> : null}{showAgain && <> {again}</>}</>;
+                const showAgain = !pricesPanel && pricesAskable && (!loading || retrying) && (pricesUpdatedAt ? unpricedCount > 0 : noneValued);
+                return <><span role="status" aria-live="polite" data-pt-price-status="true" data-own-fail="quotes" data-see-panel={pricesPanel ? RLW.seesPanel(words) : undefined}>{words}</span>{rlWait.note ? <span data-wait-note="true" data-own-fail="quotes">{(words ? ' ' : '') + rlWait.note}</span> : null}{showAgain && <> {again}</>}</>;
               })()}</span>
             </div>
           </div>
@@ -1859,7 +1930,9 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                 ].map(item => (
                   <div key={item.label}>
                     <div style={{ fontSize: 11, color: ink(0.45), marginBottom: 4 }}>{item.label}</div>
-                    <div style={{ color: noneValued && item.needsPrice ? ink(0.45) : item.color, fontFamily: "'Roboto Mono', monospace", fontWeight: 500 }}>{noneValued && item.needsPrice ? 'N/A' : Calc.formatCurrency(item.value, activePortfolio?.baseCurrency)}</div>
+                    {/* A figure of the prices still on their way is "...", as on
+                        the cards above: it read $0.00 (the sweep of). */}
+                    <div style={{ color: (noneValued || pricesPending) && item.needsPrice ? ink(0.45) : item.color, fontFamily: "'Roboto Mono', monospace", fontWeight: 500 }}>{pricesPending && item.needsPrice ? '...' : noneValued && item.needsPrice ? 'N/A' : Calc.formatCurrency(item.value, activePortfolio?.baseCurrency)}</div>
                   </div>
                 ))}
               </div>
@@ -1877,7 +1950,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                 {React.createElement(window.PortfolioAnalyticsView, {
                   portfolioId: activePortfolioId, apiKey,
                   baseCurrency: activePortfolio?.baseCurrency || 'USD',
-                  holdings, holdingsData, pricesLoading: pricesPending, onRetryPrices: retryPrices,
+                  holdings, holdingsData, pricesLoading: pricesPending, onRetryPrices: retryPricesOr,
                   onClose: () => {},
                   theme, embedded: true, initialTab: 'allocation',
                   allowedTabs: ['allocation'], compact: true,
@@ -1894,7 +1967,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                 <button onClick={() => cycleWidgetSize('health')} {...sizeLabel('health', 'Health Score')} style={{ ...(tap40 ? { ...tap40, display: 'inline-flex', alignItems: 'center' } : null), background: 'none', border: `1px solid ${bd}`, borderRadius: 3, color: ink(0.3), fontSize: 10, padding: '2px 8px', cursor: 'pointer', fontFamily: "'Sora',sans-serif" }}>{getWidgetSize('health') === 'compact' ? 'S' : getWidgetSize('health') === 'full' ? 'L' : 'M'}</button>
               </div>
               {React.createElement(window.PortfolioHealthView, {
-                holdings, positions: holdingsWithData, apiKey, pricesLoading: pricesPending, onRetryPrices: retryPrices,
+                holdings, positions: holdingsWithData, apiKey, pricesLoading: pricesPending, onRetryPrices: retryPricesOr,
                 baseCurrency: activePortfolio?.baseCurrency || 'USD',
                 onClose: () => {}, theme, embedded: true,
               })}
@@ -1911,7 +1984,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
               {React.createElement(window.PortfolioAnalyticsView, {
                 portfolioId: activePortfolioId, apiKey,
                 baseCurrency: activePortfolio?.baseCurrency || 'USD',
-                holdings, holdingsData, pricesLoading: pricesPending, onRetryPrices: retryPrices,
+                holdings, holdingsData, pricesLoading: pricesPending, onRetryPrices: retryPricesOr,
                 onClose: () => {},
                 theme, embedded: true, initialTab: 'dividends',
                 allowedTabs: ['dividends'], compact: true,
@@ -1970,11 +2043,16 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                       if (totalReturnPercent != null && totalReturnPercent > 20) alerts.push({ type: 'ok', text: `Strong total return: +${totalReturnPercent.toFixed(1)}%` });
                       if (totalReturnPercent != null && totalReturnPercent < -10) alerts.push({ type: 'alert', text: `Portfolio underwater: ${totalReturnPercent.toFixed(1)}%` });
                       // Nothing valued is nothing weighed: not "looks balanced".
+                      // Its reason said (in the terminal the key's or the
+                      // day's too), under a host's panel its pointer, and
+                      // marked.
                       if (alerts.length === 0) alerts.push(noneValued
-                        ? { type: 'warn', text: 'Needs current prices — none came back, so concentration and returns could not be checked.' }
+                        ? (pricesPanel
+                          ? { type: 'warn', fail: true, panel: true, text: 'Needs current prices. ' + Calc.pricesPanelLine(openUnpriced, false) }
+                          : { type: 'warn', fail: true, text: 'Needs current prices — none came back, so concentration and returns could not be checked.' + (aiPricesWhy ? ' ' + aiPricesWhy : '') })
                         : { type: 'ok', text: 'Portfolio looks balanced. Run the detailed AI review for more.' });
                       return alerts.map((a, i) => (
-                        <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 8px', borderRadius: 3, background: a.type === 'alert' ? 'rgba(239,68,68,0.06)' : a.type === 'warn' ? 'rgba(249,115,22,0.06)' : 'rgba(34,197,94,0.06)' }}>
+                        <div key={i} data-own-fail={a.fail ? 'quotes' : undefined} data-see-panel={a.panel ? 'true' : undefined} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 8px', borderRadius: 3, background: a.type === 'alert' ? 'rgba(239,68,68,0.06)' : a.type === 'warn' ? 'rgba(249,115,22,0.06)' : 'rgba(34,197,94,0.06)' }}>
                           <span style={{ fontSize: 12, color: ink(0.7) }}>{a.text}</span>
                         </div>
                       ));
@@ -1998,6 +2076,10 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                 </div>
                 {holdings.length === 0 ? (
                   <div style={{ color: ink(0.3), fontSize: 13, padding: 16, textAlign: 'center' }}>Add positions to see the allocation</div>
+                ) : pricesPending ? (
+                  // Weights, values and day moves of prices still on their way:
+                  // it read 0.0% $0.00 $0.00 a row (the sweep of).
+                  <div data-pt-alloc-loading="" style={{ color: ink(0.62), fontSize: 13, padding: 16, textAlign: 'center' }}>Loading prices…</div>
                 ) : (
                   <div>
                     {/* Current % is of the priced value: what it leaves out is named. */}
@@ -2107,7 +2189,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
             {showRebalancingAdvisor && window.RebalancingAdvisor && (
               <div style={{ marginTop: 16, background: 'rgba(255,255,255,0.02)', border: `1px solid ${bd}`, borderRadius: 4, padding: 20 }}>
                 {React.createElement(window.RebalancingAdvisor, {
-                  holdings, holdingsData, onRetryPrices: retryPrices,
+                  holdings, holdingsData, onRetryPrices: retryPricesOr,
                   onClose: () => setShowRebalancingAdvisor(false), theme,
                 })}
               </div>
@@ -2121,7 +2203,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
             {React.createElement(window.PortfolioAnalyticsView, {
               portfolioId: activePortfolioId, apiKey,
               baseCurrency: activePortfolio?.baseCurrency || 'USD',
-              holdings, holdingsData, pricesLoading: pricesPending, onRetryPrices: retryPrices,
+              holdings, holdingsData, pricesLoading: pricesPending, onRetryPrices: retryPricesOr,
               onClose: () => setWebTab('overview'),
               theme, embedded: true, initialTab: 'performance',
               allowedTabs: ['allocation', 'performance', 'risk', 'dividends', 'benchmark'],
@@ -2135,7 +2217,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
             {React.createElement(window.PortfolioAnalyticsView, {
               portfolioId: activePortfolioId, apiKey,
               baseCurrency: activePortfolio?.baseCurrency || 'USD',
-              holdings, holdingsData, pricesLoading: pricesPending, onRetryPrices: retryPrices,
+              holdings, holdingsData, pricesLoading: pricesPending, onRetryPrices: retryPricesOr,
               onClose: () => setWebTab('overview'),
               theme, embedded: true, initialTab: window._researchInitialTab || 'correlation',
               allowedTabs: ['correlation', 'montecarlo', 'backtest', 'whatif'],
@@ -2148,7 +2230,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
           <div style={{ background: 'rgba(255,255,255,0.02)', border: `1px solid ${bd}`, borderRadius: 4, padding: 20 }}>
             {React.createElement(window.TaxView, {
               portfolioId: activePortfolioId, holdings, holdingsData,
-              baseCurrency: activePortfolio?.baseCurrency || 'USD', onRetryPrices: retryPrices,
+              baseCurrency: activePortfolio?.baseCurrency || 'USD', onRetryPrices: retryPricesOr,
               // Back goes to Overview, and so does the focus: it was left on
               // <body> with the arrow gone.
               onClose: () => { setWebTab('overview'); setTimeout(() => { try { const tab = document.querySelector('[role="tablist"] [data-tab="overview"]'); if (tab) tab.focus(); } catch (_) {} }, 0); }, theme,
@@ -2169,9 +2251,11 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
               annualReturn: !noneValued && moneyWeighted ? moneyWeighted.annual : null, // money-weighted (IRR)
               // Why a held position has no value, when a request failed --
               // none of them or some -- and Try again.
-              onRetryPrices: unpricedCount > 0 ? retryPrices : null,
+              onRetryPrices: unpricedCount > 0 ? retryPricesOr : null,
               pricesWhy: Calc.unpricedWhy(openUnpriced, activePortfolio?.baseCurrency || 'USD'),
               pricesLeftOut: Calc.unpricedLine(openUnpriced, activePortfolio?.baseCurrency || 'USD'),
+            // Refused for the key or the day under a host's panel: its pointer.
+            pricesPanel: pricesPanel ? Calc.pricesPanelLine(openUnpriced, true) : '',
               onClose: () => setWebTab('overview'), theme,
             })}
           </div>
@@ -2496,14 +2580,19 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                 noneValued ? 'N/A' : Calc.formatCurrency(totalValue, activePortfolio?.baseCurrency)
               )}
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, color: signColor(pnl) }}>
+            {/* While the totals load, "Loading..." alone: it read "Loading...
+                €0.00 (0.00%) all time" through the limit's pause, zeros for
+                figures not known yet (the class of). */}
+            {!loading && (
+            <div data-pt-header-pnl="" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, color: signColor(pnl) }}>
               <Icon name={pnl >= 0 ? 'trendUp' : 'trendDown'} size={16} color={signColor(pnl)} />
               <span style={{ fontWeight: 600 }}>
                 {noneValued ? 'N/A' : <>{Calc.formatCurrency(pnl, activePortfolio?.baseCurrency)} ({Calc.formatPercent(pnlPercent)})</>}
               </span>
               <span style={{ fontSize: 14, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>all time</span>
             </div>
-            {!dayUnknown && dayChange !== 0 && (
+            )}
+            {!loading && !dayUnknown && dayChange !== 0 && (
               <div style={{ fontSize: 14, marginTop: 4, color: signColor(dayChange) }}>
                 {Calc.formatCurrency(dayChange, activePortfolio?.baseCurrency)} today
               </div>
@@ -2515,12 +2604,12 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
             {/* Only the words are the live region: the held press's note and
                 the button count the wait every second. */}
             {(() => {
-              const shown = (!loading || retrying) && unpricedCount > 0;
+              const shown = (!loading || retrying) && (unpricedCount > 0 || Boolean(keptWords));
               return (
                 <div style={shown ? { fontSize: 13, marginTop: 8, color: isDark ? C3.textMutedDark : C3.textMutedLight } : undefined}>
-                  <span role="status" aria-live="polite" data-pt-price-status="true" data-own-fail="quotes">{shown ? (loading ? 'Loading prices…' : noneValued ? noPricesWords : withRateWhy(`${unpricedCount} of ${holdings.length} positions ${unpricedCount === 1 ? 'has' : 'have'} no price${quoteMissing && pricesLimited ? ': ' + RLW.REACHED : quoteMissing && pricesWhy ? ': ' + pricesWhy : '.'}`)) : ''}</span>
-                  {shown && rlWait.note ? <span data-wait-note="true">{` ${rlWait.note}`}</span> : null}
-                  {shown && <RLW.RetryButton wait={rlWait} busyKey="prices" isDark={isDark} onClick={retryPrices} style={{ marginLeft: 8, padding: '6px 12px', minHeight: 32, borderRadius: 8, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 13, fontWeight: 600, cursor: 'pointer' }} />}
+                  <span role="status" aria-live="polite" data-pt-price-status="true" data-own-fail="quotes">{shown ? (loading ? 'Loading prices…' : unpricedCount === 0 ? keptWords : (noneValued ? noPricesWords : withRateWhy(`${unpricedCount} of ${holdings.length} positions ${unpricedCount === 1 ? 'has' : 'have'} no price${quoteMissing && pricesLimited ? ': ' + RLW.REACHED : quoteMissing && pricesWhy ? ': ' + pricesWhy : '.'}`)) + (keptWords ? ' ' + keptWords : '')) : ''}</span>
+                  {shown && rlWait.note ? <span data-wait-note="true" data-own-fail="quotes">{` ${rlWait.note}`}</span> : null}
+                  {shown && pricesAskable && unpricedCount > 0 && <RLW.RetryButton wait={rlWait} busyKey="prices" isDark={isDark} onClick={retryPrices} style={{ marginLeft: 8, padding: '6px 12px', minHeight: 32, borderRadius: 8, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 13, fontWeight: 600, cursor: 'pointer' }} />}
                 </div>
               );
             })()}
@@ -3040,7 +3129,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
             baseCurrency: activePortfolio?.baseCurrency || 'USD',
             holdings: holdings,
             holdingsData: holdingsData,
-            pricesLoading: pricesPending, onRetryPrices: retryPrices,
+            pricesLoading: pricesPending, onRetryPrices: retryPricesOr,
             initialTab: analyticsTab || undefined,
             onClose: closeTool(setShowAnalytics),
             theme: theme
@@ -3056,7 +3145,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
             holdings: holdings,
             holdingsData: holdingsData,
             baseCurrency: activePortfolio?.baseCurrency || 'USD',
-            onRetryPrices: retryPrices,
+            onRetryPrices: retryPricesOr,
             onClose: () => setShowTaxView(false),
             theme: theme
           })}
@@ -3073,9 +3162,11 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
             totalValue: totalValue,
             totalReturn: noneValued ? null : totalReturnPercent, // the header's figure, not open-lot P&L
               annualReturn: !noneValued && moneyWeighted ? moneyWeighted.annual : null, // money-weighted (IRR)
-            onRetryPrices: unpricedCount > 0 ? retryPrices : null,
+            onRetryPrices: unpricedCount > 0 ? retryPricesOr : null,
             pricesWhy: Calc.unpricedWhy(openUnpriced, activePortfolio?.baseCurrency || 'USD'),
             pricesLeftOut: Calc.unpricedLine(openUnpriced, activePortfolio?.baseCurrency || 'USD'),
+            // Refused for the key or the day under a host's panel: its pointer.
+            pricesPanel: pricesPanel ? Calc.pricesPanelLine(openUnpriced, true) : '',
             onClose: () => setShowMacroDashboard(false),
             theme: theme
           })}
@@ -3089,7 +3180,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
             holdings: holdings,
             positions: holdingsWithData,
             apiKey: apiKey,
-            pricesLoading: pricesPending, onRetryPrices: retryPrices,
+            pricesLoading: pricesPending, onRetryPrices: retryPricesOr,
             baseCurrency: activePortfolio?.baseCurrency || 'USD',
             onClose: () => setShowPortfolioHealth(false),
             theme: theme
@@ -3141,7 +3232,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
         window.RebalancingAdvisor, {
           holdings: holdings,
           holdingsData: holdingsData,
-          onRetryPrices: retryPrices,
+          onRetryPrices: retryPricesOr,
           theme: theme,
           onClose: closeTool(setShowRebalancingAdvisor),
         }
@@ -3217,6 +3308,29 @@ window.PortfolioTrackerBoundary = (() => {
       n ? React.createElement('span', { role: 'status' }, `${n} trade${n === 1 ? '' : 's'} in this browser belong${n === 1 ? 's' : ''} to no position: a change the browser refused part way left ${n === 1 ? 'it' : 'them'}, and no screen shows ${n === 1 ? 'it' : 'them'}. `) : null,
       n ? React.createElement('button', { type: 'button', onClick: clean, style: { marginLeft: 4, padding: '4px 12px', minHeight: 32, borderRadius: 6, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: ink, fontSize: 12, fontWeight: 600, cursor: 'pointer' } }, n === 1 ? 'Delete it' : 'Delete them') : null,
       note ? React.createElement('span', { role: 'status', style: { display: 'block', marginTop: n ? 6 : 0 } }, note) : null);
+  };
+  // What the repair of positions without a portfolio put back on this load
+  // (Storage.takeRecovered), said once: it moved them without a word (found now 2). Gone on the next load, when nothing is lost.
+  const RecoveredNote = ({ theme }) => {
+    const S = window.PortfolioStorage;
+    const [said, setSaid] = React.useState(() => (S && S.takeRecovered ? S.takeRecovered() : null));
+    React.useEffect(() => {
+      const took = () => { const r = S && S.takeRecovered ? S.takeRecovered() : null; if (r) setSaid(r); };
+      window.addEventListener('portfolio:recovered', took);
+      took();
+      return () => window.removeEventListener('portfolio:recovered', took);
+    }, []);
+    if (!said || (!said.restored.length && !said.recreated.length && !(said.into || []).length)) return null;
+    const isDark = theme === 'dark';
+    const C3 = window.C3 || {};
+    const ink = isDark ? (C3.textDark || '#E9E6DF') : (C3.textLightTheme || '#1e1b4b');
+    const list = (xs) => xs.map(x => '"' + x + '"').join(', ');
+    const words = 'Some positions had lost their portfolio and were recovered.'
+      + (said.restored.length ? ` Put back as they were: ${list(said.restored)}.` : '')
+      + (said.recreated.length || (said.into || []).length ? ` Where their portfolio is not known, they are in ${list(said.recreated.concat(said.into || []))}, one per currency.` : '')
+      + ' Nothing was merged.';
+    return React.createElement('div', { 'data-pt-recovered': 'true', style: { margin: '12px 16px', padding: '10px 14px', borderRadius: 8, fontSize: 13, lineHeight: 1.5, color: ink, border: `1px solid ${isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.2)'}` } },
+      React.createElement('span', { role: 'status' }, words));
   };
   function Boundary(props) {
     React.Component.call(this, props);
@@ -3394,11 +3508,13 @@ window.PortfolioTrackerBoundary = (() => {
   };
   // Drawn with the view, inside the boundary, above it.
   Boundary.OrphanTradesNote = OrphanTradesNote;
+  Boundary.RecoveredNote = RecoveredNote;
   return Boundary;
 })();
 
 window.PortfolioTrackerView = (props) => React.createElement(
   window.PortfolioTrackerBoundary, { theme: props.theme },
   React.createElement(window.PortfolioTrackerBoundary.OrphanTradesNote, { theme: props.theme }),
+  React.createElement(window.PortfolioTrackerBoundary.RecoveredNote, { theme: props.theme }),
   React.createElement(window.PortfolioTrackerViewInner, props)
 );

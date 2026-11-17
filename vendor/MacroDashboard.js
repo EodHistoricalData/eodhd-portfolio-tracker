@@ -2,7 +2,7 @@
 // `pricesWhy`: why no position has a value, when the prices failed (the
 // shared words, Calc.unpricedWhy), else empty. `pricesLeftOut`: the held
 // positions without a value, by ticker and why (Calc.unpricedLine).
-window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, totalReturn, annualReturn, onClose, theme, onRetryPrices, pricesWhy, pricesLeftOut }) => {
+window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, totalReturn, annualReturn, onClose, theme, onRetryPrices, pricesWhy, pricesLeftOut, pricesPanel }) => {
   const [macroData, setMacroData] = React.useState(null);
   const [treasuryRates, setTreasuryRates] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
@@ -233,7 +233,7 @@ window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, to
   // a refused yield reads N/A).
   const noValue = () => 'N/A';
   const missedCaption = (key) => missed[key] && (
-    <div data-macro-missed={key} style={{ fontSize: 10, marginTop: 2, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>did not load</div>
+    <div data-macro-missed={key} data-own-fail="macro" style={{ fontSize: 10, marginTop: 2, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>did not load</div>
   );
 
   // The newest observation with a number in it, and its date. A 0.0 reading
@@ -313,15 +313,25 @@ window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, to
   const riskPremium = nominalReturn == null || !riskFreeKnown ? null : nominalReturn - riskFreeRate;
   const periodLabel = holdingDays == null
     ? 'no transactions yet'
-    // Prices that failed are named, with why: "no priced positions" read as
-    // a book with nothing to price under a quote feed at 500. Said so only when none is known.
+    // Prices that failed are named, with why (pricesLabel below): "no priced
+    // positions" read as a book with nothing to price under a quote feed at
+    // 500. Said so only when none is
+    // known.
     : !Number.isFinite(totalReturn)
-      ? (pricesWhy ? String(pricesWhy).charAt(0).toLowerCase() + String(pricesWhy).slice(1).replace(/\.$/, '') : 'no priced positions to measure')
+      ? 'no priced positions to measure'
     : holdingDays < 90
       ? `held ${holdingDays} days — too short to state an annual rate`
       : moneyWeighted
         ? `money-weighted (IRR) over ${(holdingDays / 365).toFixed(1)} years`
         : `annualised over ${(holdingDays / 365).toFixed(1)} years`;
+  // No rate for the prices' failure: the lines that say so are failure
+  // lines (data-own-fail), with its reason, and under a host's panel for
+  // the key or the day they point at it with no Try again. "Real return needs an annual rate -- the GBP/USD rate
+  // did not load: …" went unmarked, and read "no priced positions to
+  // measure" with Try again under the panel.
+  const pricesFailed = holdingDays != null && !Number.isFinite(totalReturn) && Boolean(pricesWhy || pricesPanel);
+  const pricesPointer = pricesFailed && pricesPanel ? RLW.panelLine('The prices') : '';
+  const pricesLabel = pricesFailed && pricesWhy ? String(pricesWhy).charAt(0).toLowerCase() + String(pricesWhy).slice(1).replace(/\.$/, '') : '';
 
   return (
     <div ref={panelRef} style={styles.container}>
@@ -347,7 +357,7 @@ window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, to
       ) : (
         <div style={{ padding: 16 }}>
           {loadFail && (
-            <RLW.FailNote panel="macro" ownFail="macro" ownFocus
+            <RLW.FailNote panel="macro" ownFail="macro" ownFocus sayPanel
               what={loadFail.count >= loadFail.of ? 'The economic data' : `${loadFail.count} of ${loadFail.of} figures`}
               failure={loadFail} onRetry={retryMacro} isDark={isDark}
               style={{ marginBottom: 16, padding: '10px 12px', borderRadius: 12, border: `1px solid ${isDark ? C3.lineDark : C3.lineLight}`, background: isDark ? C3.fillDark : C3.fillLight }}
@@ -378,18 +388,18 @@ window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, to
               {realReturn == null
                 ? (nominalReturn != null && macroData?.inflation == null
                   ? 'Real return needs an inflation figure, and none could be loaded.'
-                  : <>{'Real return needs an annual rate — ' + periodLabel + '.'}{onRetryPrices && !Number.isFinite(totalReturn) && holdingDays != null && (
+                  : <span data-own-fail={pricesFailed ? 'quotes' : undefined} data-see-panel={pricesPointer ? 'true' : undefined}>{pricesPointer ? 'Real return needs an annual rate. ' + pricesPointer : 'Real return needs an annual rate — ' + (pricesLabel || periodLabel) + '.'}{onRetryPrices && !pricesPointer && !Number.isFinite(totalReturn) && holdingDays != null && (
                     <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />
-                  )}</>)
+                  )}</span>)
                 : `Your portfolio ${realReturn >= 0 ? 'is growing' : 'is losing'} purchasing power at ${Math.abs(realReturn).toFixed(2)}% per year (${periodLabel}; ${cumulativeReturn >= 0 ? '+' : ''}${cumulativeReturn.toFixed(2)}% in total)`}
             </div>
             {/* Some positions valued, some not for a failed request: the
                 return is of the valued ones, and says why the rest are not
                 in it, with Try again. */}
-            {Number.isFinite(totalReturn) && (pricesLeftOut || pricesWhy) && (
-              <div data-unpriced-why="true" data-own-fail="quotes" style={{ marginTop: 8, fontSize: 12, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
-                <span role="status">{pricesLeftOut || pricesWhy} The return leaves out the positions without a value.</span>
-                {onRetryPrices && (
+            {Number.isFinite(totalReturn) && (pricesPanel || pricesLeftOut || pricesWhy) && (
+              <div data-unpriced-why="true" data-own-fail="quotes" data-see-panel={pricesPanel ? 'true' : undefined} style={{ marginTop: 8, fontSize: 12, lineHeight: 1.5, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+                <span role="status">{pricesPanel || ((pricesLeftOut || pricesWhy) + ' The return leaves out the positions without a value.')}</span>
+                {onRetryPrices && !pricesPanel && (
                   <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />
                 )}
               </div>
@@ -416,7 +426,8 @@ window.MacroDashboardView = ({ portfolioId, apiKey, baseCurrency, totalValue, to
               <div style={{ fontSize: 12, marginBottom: 4, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>Risk Premium</div>
               <div style={{ fontSize: 24, fontWeight: 700, color: riskPremium == null ? (isDark ? C3.textMutedDark : C3.textMutedLight) : riskPremium >= 0 ? C3.success : C3.error }}>{riskPremium == null ? 'N/A' : (riskPremium >= 0 ? '+' : '') + riskPremium.toFixed(2) + '%'}</div>
               <div style={{ fontSize: 12, marginTop: 4, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
-                {riskPremium == null ? (nominalReturn != null && !riskFreeKnown ? 'Risk premium needs the 10-year Treasury yield, and none could be loaded.' : periodLabel) : riskPremium >= 0 ? 'You are earning more than risk-free bonds' : 'Risk-free bonds would have performed better'}
+                {riskPremium == null ? (nominalReturn != null && !riskFreeKnown ? 'Risk premium needs the 10-year Treasury yield, and none could be loaded.'
+                  : pricesFailed ? <span data-own-fail={pricesFailed ? 'quotes' : undefined} data-see-panel={pricesPointer ? 'true' : undefined}>{pricesPointer || pricesLabel}</span> : periodLabel) : riskPremium >= 0 ? 'You are earning more than risk-free bonds' : 'Risk-free bonds would have performed better'}
               </div>
             </div>
           </div>

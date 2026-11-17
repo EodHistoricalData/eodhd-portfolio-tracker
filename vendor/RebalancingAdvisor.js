@@ -107,7 +107,10 @@ window.RebalancingAdvisor = ({ holdings, holdingsData, theme, onClose, onRetryPr
     // Those left out, by ticker and why: the currency and the reason did not
     // say which positions they were once there were several.
     const leftOut = PC && PC.unpricedLine ? PC.unpricedLine(rows, currency) : '';
-    return { totalValue, count, types, currency, needsPrices, why, leftOut };
+    // Refused for the key or the day under a host's own panel: its pointer
+    // only (Calc.pricesUnderPanel).
+    const panel = PC && PC.pricesUnderPanel && PC.pricesUnderPanel(rows) ? PC.pricesPanelLine(rows, !needsPrices) : '';
+    return { totalValue, count, types, currency, needsPrices, why, leftOut, panel };
   }, [holdings, holdingsData]);
 
   // Target weights a template or an AI build left in each position's note
@@ -200,17 +203,19 @@ window.RebalancingAdvisor = ({ holdings, holdingsData, theme, onClose, onRetryPr
                 {portfolioSummary.count} holding{portfolioSummary.count !== 1 ? 's' : ''}
               </div>
               {portfolioSummary.needsPrices && (
-                <div style={{ fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
-                  Needs current prices — none came back for these positions.{portfolioSummary.why ? ' ' + portfolioSummary.why : ''}
-                  {onRetryPrices && (
+                <div data-own-fail="quotes" data-see-panel={portfolioSummary.panel ? 'true' : undefined} style={{ fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
+                  {portfolioSummary.panel ? 'Needs current prices. ' + portfolioSummary.panel : <>Needs current prices — none came back for these positions.{portfolioSummary.why ? ' ' + portfolioSummary.why : ''}</>}
+                  {onRetryPrices && !portfolioSummary.panel && (
                     <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 6, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer' }} />
                   )}
                 </div>
               )}
-              {!portfolioSummary.needsPrices && (portfolioSummary.leftOut || portfolioSummary.why) && (
-                <div data-unpriced-why="true" style={{ fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
-                  <span role="status">{portfolioSummary.leftOut || portfolioSummary.why} The total leaves out the positions without a value.</span>
-                  {onRetryPrices && (
+              {/* The screen's own line about the prices (data-own-fail), as the
+                  one above: under a host's panel it points at it (the mark was missing here). */}
+              {!portfolioSummary.needsPrices && (portfolioSummary.panel || portfolioSummary.leftOut || portfolioSummary.why) && (
+                <div data-unpriced-why="true" data-own-fail="quotes" data-see-panel={portfolioSummary.panel ? 'true' : undefined} style={{ fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
+                  <span role="status">{portfolioSummary.panel || ((portfolioSummary.leftOut || portfolioSummary.why) + ' The total leaves out the positions without a value.')}</span>
+                  {onRetryPrices && !portfolioSummary.panel && (
                     <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 6, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer' }} />
                   )}
                 </div>

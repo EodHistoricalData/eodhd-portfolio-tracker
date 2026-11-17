@@ -2092,8 +2092,9 @@ window.PortfolioCalculations = {
     const held = (rows || []).filter(r => r && r.priceUnavailable && Number(r.quantity) > 0);
     const out = [];
     const seen = {};
+    const own = this.saidFail;
     held.forEach((r) => {
-      const f = r.fxUnavailable ? r.fxFail : null;
+      const f = r.fxUnavailable ? own(r.fxFail, r.fxRefused) : null;
       if (!f) return;
       const pair = `${r.currency}/${baseCurrency}`;
       if (seen[pair]) return;
@@ -2101,12 +2102,94 @@ window.PortfolioCalculations = {
       out.push(RLW.failText(`The ${pair} rate`, f));
     });
     if (!(opts && opts.ratesOnly)) {
-      const q = held.find(r => !r.fxUnavailable && r.priceFail);
-      if (q) out.push(RLW.failText('The prices', q.priceFail));
+      const q = held.find(r => !r.fxUnavailable && !r.notAvailable && own(r.priceFail, r.priceRefused));
+      const qf = q ? own(q.priceFail, q.priceRefused) : null;
+      if (qf) out.push(this.isPlanRefusal(qf) ? 'Current prices are not included in this plan.' : RLW.failText('The prices', qf));
       const none = this.noRecordWhy(rows);
       if (none) out.push(none);
+      const refused = this.notAvailableWhy(rows);
+      if (refused) out.push(refused);
     }
     return out.join(' ');
+  },
+
+  // The failure a line says for a position: its outage, else a refusal of
+  // the key or the day (401, 402) where no host's panel says it -- the
+  // terminal's. "No prices came back." and "Needs current prices -- none
+  // came back" gave no reason anywhere on screen at 401 and 402; under the host's panel the lines point at it
+  // (pricesUnderPanel) and say nothing more.
+  // A plan's refusal (403): not asked again.
+  isPlanRefusal(f) {
+    return Boolean(f && Number(f.status) === 403 && !f.limited && !f.unreadable);
+  },
+  // A held position left without a value because the plan refused its quote
+  // or its currency's rate.
+  planRefused(r) {
+    return Boolean(r && r.priceUnavailable && this.isPlanRefusal(r.fxUnavailable ? r.fxRefused : r.priceRefused));
+  },
+
+  /**
+   * The positions priced at the last price the client kept at the limit
+   * (priceKept: { failure, at }), said beside "Prices as of": "M&M.NSE: the
+   * last price kept, from 11:40 AM — EODHD's per-minute request limit was
+   * reached." An old price read as current. '' when none.
+   */
+  keptLine(rows) {
+    const RLW = window.RateLimitWait;
+    const kept = (rows || []).filter(r => r && !r.priceUnavailable && r.priceKept && Number(r.quantity) > 0);
+    if (!kept.length) return '';
+    const syms = [];
+    kept.forEach((r) => { const s = String(r.symbol || r.name || '').trim(); if (s && syms.indexOf(s) === -1) syms.push(s); });
+    const at = kept.map(r => r.priceKept.at).filter(Boolean).sort((a, b) => a - b)[0];
+    const when = at ? ', from ' + at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' }) : '';
+    const f = (kept.find(r => r.priceKept.failure && r.priceKept.failure.limited) || kept[0]).priceKept.failure;
+    const why = RLW && RLW.failReason && f ? RLW.failReason(f, true) : '';
+    return `${this.namesList(syms)}: the last ${syms.length > 1 ? 'prices' : 'price'} kept${when}${why ? ' — ' + why : '.'}`;
+  },
+
+  saidFail(fail, refused) {
+    const RLW = window.RateLimitWait;
+    if (fail) return fail;
+    return refused && !(RLW && typeof RLW.hostSaysKey === 'function' && RLW.hostSaysKey(refused)) ? refused : null;
+  },
+
+  // The held positions whose symbol the backend refuses outright (400
+  // invalid_parameter: M&M.NSE), said as Sentiment says them: "A price is
+  // not available for M&M.NSE." -- no failure to try again.
+  notAvailableWhy(rows) {
+    const codes = [];
+    (rows || []).forEach((r) => {
+      if (!r || !r.priceUnavailable || r.fxUnavailable || !r.notAvailable || !(Number(r.quantity) > 0)) return;
+      const c = String(r.symbol || '').trim();
+      if (c && codes.indexOf(c) === -1) codes.push(c);
+    });
+    return codes.length ? `A price is not available for ${this.namesList(codes)}.` : '';
+  },
+
+  /**
+   * Whether every held position left without a value is so for a refusal
+   * a host's own panel says -- the key refused (401) or the day spent (402)
+   * under the open apps' frame (RateLimitWait.hostSaysKey). Every line about
+   * them then says only that the prices did not load and points at the
+   * panel: "Needs current prices — none came back"
+   * and "5 without a price: …" stood beside it as a second message about one
+   * failure (the open apps' failure matrix). False in the terminal,
+   * which has no such panel and keeps its words. `rows`: holdingsData
+   * entries (priceRefused / fxRefused, set where the prices are loaded).
+   */
+  pricesUnderPanel(rows) {
+    const RLW = window.RateLimitWait;
+    if (!RLW || typeof RLW.hostSaysKey !== 'function') return false;
+    const held = (rows || []).filter(r => r && r.priceUnavailable && Number(r.quantity) > 0);
+    return held.length > 0 && held.every(r => RLW.hostSaysKey(r.fxUnavailable ? r.fxRefused : r.priceRefused));
+  },
+  // The panel's pointer for them: "The prices did not load. See the panel
+  // above." -- of some named, when others have a value.
+  pricesPanelLine(rows, some) {
+    const RLW = window.RateLimitWait;
+    const syms = this.unpricedSymbols(rows);
+    const what = some && syms.length ? `The prices of ${this.namesList(syms)}` : 'The prices';
+    return RLW && RLW.panelLine ? RLW.panelLine(what) : what + ' did not load. See the panel above.';
   },
 
   /**
@@ -2122,7 +2205,7 @@ window.PortfolioCalculations = {
       const c = String(r.symbol || '').split('.')[0];
       if (c && codes.indexOf(c) === -1) codes.push(c);
     });
-    return codes.length ? `No price on record for ${codes.join(', ')}.` : '';
+    return codes.length ? `No price on record for ${this.namesList(codes)}.` : '';
   },
 
   /**
@@ -2140,9 +2223,11 @@ window.PortfolioCalculations = {
     return out;
   },
 
-  // "A, B, C and 4 more": the first `max` named, the rest counted.
+  // "A, B, C, D and 4 more": the first `max` named (four, as the pickers'
+  // "MSF.XETRA, MSF.F, MSF.STU, MSF.HM and 3 more"), the rest counted. A
+  // line about a big portfolio's positions named every one of them.
   namesList(list, max) {
-    const n = max || 6;
+    const n = max || 4;
     const all = list || [];
     if (all.length <= n) return all.join(', ');
     return `${all.slice(0, n).join(', ')} and ${all.length - n} more`;
@@ -2164,11 +2249,16 @@ window.PortfolioCalculations = {
     held.forEach((r) => {
       const sym = String(r.symbol || r.name || '').trim();
       let why = '';
+      const fx = this.saidFail(r.fxFail, r.fxRefused);
+      const pf = this.saidFail(r.priceFail, r.priceRefused);
       if (r.fxUnavailable) {
         const pair = `${r.currency}/${baseCurrency || 'USD'}`;
-        why = r.fxFail && reason(r.fxFail) ? `the ${pair} rate did not load: ${reason(r.fxFail)}` : `the ${pair} rate did not load.`;
+        why = this.isPlanRefusal(fx) ? `the ${pair} rate is not included in this plan (403).`
+          : fx && reason(fx) ? `the ${pair} rate did not load: ${reason(fx)}` : `the ${pair} rate did not load.`;
       } else if (r.noRecord) why = 'no price on record.';
-      else if (r.priceFail && reason(r.priceFail)) why = `the price did not load: ${reason(r.priceFail)}`;
+      else if (r.notAvailable) why = 'not available.';
+      else if (this.isPlanRefusal(pf)) why = 'the price is not included in this plan (403).';
+      else if (pf && reason(pf)) why = `the price did not load: ${reason(pf)}`;
       let g = byWhy[why];
       if (!g) { g = byWhy[why] = { why, syms: [] }; groups.push(g); }
       if (sym && g.syms.indexOf(sym) === -1) g.syms.push(sym);

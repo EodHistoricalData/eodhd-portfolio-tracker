@@ -90,11 +90,19 @@ window.TaxView = function TaxView({ portfolioId, holdings, holdingsData, baseCur
   // the list said nothing -- a GBP position $11M under its cost vanished
   // from it when the GBP/USD rate failed. The currency alone did not say
   // which positions they were.
+  // Refused for the key or the day under a host's own panel: only that the
+  // prices did not load, pointing at it (Calc.pricesUnderPanel) -- "5 without a price: …" stood beside it.
+  const unpricedPanel = React.useMemo(() => {
+    const PC = window.PortfolioCalculations;
+    const rows = (holdings || []).map(h => holdingsData?.[h.id]).filter(Boolean);
+    return Boolean(PC && PC.pricesUnderPanel && PC.pricesUnderPanel(rows));
+  }, [holdings, holdingsData]);
   const unpricedWhy = React.useMemo(() => {
     const PC = window.PortfolioCalculations;
     const rows = (holdings || []).map(h => holdingsData?.[h.id]).filter(Boolean);
+    if (unpricedPanel) return PC.pricesPanelLine(rows, rows.some(r => !r.priceUnavailable && Number(r.quantity) > 0));
     return PC && PC.unpricedLine ? PC.unpricedLine(rows, baseCurrency || 'USD') : PC && PC.unpricedWhy ? PC.unpricedWhy(rows, baseCurrency || 'USD') : '';
-  }, [holdings, holdingsData, baseCurrency]);
+  }, [holdings, holdingsData, baseCurrency, unpricedPanel]);
 
   const harvestingCandidates = React.useMemo(
     () => Tax.getHarvestingCandidates(holdings || [], allTransactions, currentPrices),
@@ -295,9 +303,9 @@ window.TaxView = function TaxView({ portfolioId, holdings, holdingsData, baseCur
       // Section 3: Tax-Loss Harvesting
       (harvestingCandidates.length > 0 || unpricedWhy) && React.createElement('div', { style: styles.card },
         React.createElement(sectionTag, { style: styles.sectionTitle }, harvestingCandidates.length > 0 ? `Tax-Loss Harvesting (${harvestingCandidates.length} candidate${harvestingCandidates.length === 1 ? '' : 's'})` : 'Tax-Loss Harvesting'),
-        unpricedWhy && React.createElement('div', { 'data-unpriced-why': 'true', 'data-own-fail': 'quotes', style: { fontSize: 12, lineHeight: 1.5, marginBottom: harvestingCandidates.length ? 4 : 0, color: isDark ? C3.textMutedDark : C3.textMutedLight } },
-          React.createElement('span', { role: 'status' }, unpricedWhy + ' The list leaves out the positions without a value.'),
-          onRetryPrices && window.RateLimitWait && window.RateLimitWait.RetryButton && React.createElement(window.RateLimitWait.RetryButton, {
+        unpricedWhy && React.createElement('div', { 'data-unpriced-why': 'true', 'data-own-fail': 'quotes', 'data-see-panel': unpricedPanel ? 'true' : undefined, style: { fontSize: 12, lineHeight: 1.5, marginBottom: harvestingCandidates.length ? 4 : 0, color: isDark ? C3.textMutedDark : C3.textMutedLight } },
+          React.createElement('span', { role: 'status' }, unpricedPanel ? unpricedWhy : unpricedWhy + ' The list leaves out the positions without a value.'),
+          onRetryPrices && !unpricedPanel && window.RateLimitWait && window.RateLimitWait.RetryButton && React.createElement(window.RateLimitWait.RetryButton, {
             busyKey: 'prices', isDark, onClick: onRetryPrices,
             style: { marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" },
           })),

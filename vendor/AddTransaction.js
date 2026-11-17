@@ -531,12 +531,12 @@ window.AddTransactionModal = ({ holding, baseCurrency, onClose, onSave, theme, t
           </>
         )}
         {fxNote && (
-          <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.5, color: C3.warning }}>{fxNote}</div>
+          <div data-own-fail="quotes" style={{ marginTop: 8, fontSize: 12, lineHeight: 1.5, color: C3.warning }}>{fxNote}</div>
         )}
       </div>
 
       {formError && (
-        <div role="alert" style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, fontSize: 13, lineHeight: 1.5, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', color: C3.error }}>{formError}</div>
+        <div role="alert" data-own-fail={/did not load/.test(formError) ? 'history' : undefined} style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, fontSize: 13, lineHeight: 1.5, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', color: C3.error }}>{formError}</div>
       )}
 
       {/* Save Button */}

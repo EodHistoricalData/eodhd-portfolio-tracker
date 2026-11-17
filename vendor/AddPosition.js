@@ -691,7 +691,18 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
         });
       } catch (e) {
         // No position without its trade: the holding made for it goes too.
-        if (created) { try { Storage.deleteHolding(holding.id); } catch (_) { /* nothing more to undo */ } }
+        // When that could not be written either, the line says the position
+        // stays without trades -- it is stored so, and a reload shows it so.
+        // A refused rollback was swallowed: only "This browser blocks site
+        // storage…", and JNJ stayed as "0 shares" with no trades, after a
+        // reload too (found now 1).
+        if (created) {
+          const sym = String(holding.symbol || holding.name || '').trim();
+          const back = Storage.takeBackHoldings
+            ? Storage.takeBackHoldings([holding.id], () => `The trade was not saved, and the new position ${sym} could not be taken back, so it stays without trades: `)
+            : (() => { try { Storage.deleteHolding(holding.id); return true; } catch (u) { return u; } })();
+          if (back !== true) throw back;
+        }
         throw e;
       }
       // One request for the trade and the holding, before the form closes.
@@ -706,13 +717,22 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
       } else if (!sync.ok) {
         // Refused: this save is taken back, and only this save -- whatever
         // else reached the device meanwhile (a pull, another tab) stays.
+        // A take-back that could not be written is said with what is
+        // stored now, as the import says it.
+        let undo = null;
         try {
           if (created) Storage.deleteHolding(holding.id);
           else if (createdTx && createdTx.id) Storage.deleteTransaction(createdTx.id);
-        } catch (_) { /* nothing more to undo */ }
+        } catch (u) { undo = u; }
         savingRef.current = false;
         setSaving(false);
-        setSyncError(`The position was not saved: your account did not take it (${sync.error}). Check the connection and try again.`);
+        const notTaken = `The position was not saved: your account did not take it (${sync.error}).`;
+        if (!undo) setSyncError(`${notTaken} Check the connection and try again.`);
+        else if (undo.partial) setSyncError(`${notTaken} ${undo.message}`);
+        else {
+          setSyncError(`${notTaken} It could not be taken back on this device either, so it stays here as entered: ${String((undo && undo.message) || 'the data could not be saved.').replace(/^./, c => c.toLowerCase())}`);
+          try { window.dispatchEvent(new CustomEvent('portfolio:storage-partial')); } catch (_) { /* a courtesy */ }
+        }
         return;
       }
       onSave?.(portfolioId);
@@ -967,7 +987,7 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
               <input id="pt-addpos-qty" {...(window.NumberInput ? window.NumberInput.fieldProps : { type: 'number' })} placeholder={selectedAsset.isManual ? 'e.g. 1' : selectedAsset.Exchange === 'CC' ? 'e.g. 0.5' : 'e.g. 10'} value={txQuantity} onChange={(e) => setTxQuantity(e.target.value)} style={styles.input} />
             </div>
             <div>
-              <label style={styles.label} htmlFor="pt-addpos-price">{(selectedAsset.isManual ? 'Total Value' : 'Price per unit') + (selectedAsset.Currency ? ` (${selectedAsset.Currency})` : '')}{priceNote && <span style={{ fontWeight: 400 }}> · {priceNote}</span>}</label>
+              <label style={styles.label} htmlFor="pt-addpos-price">{(selectedAsset.isManual ? 'Total Value' : 'Price per unit') + (selectedAsset.Currency ? ` (${selectedAsset.Currency})` : '')}{priceNote && <span data-own-fail="history" style={{ fontWeight: 400 }}> · {priceNote}</span>}</label>
               <input id="pt-addpos-price" {...(window.NumberInput ? window.NumberInput.fieldProps : { type: 'number' })} placeholder="e.g. 150.00" value={txPrice} onChange={(e) => { priceTypedRef.current = true; setPriceNote(null); setTxPrice(e.target.value); }} style={styles.input} />
             </div>
             {!selectedAsset.isManual && (
@@ -994,7 +1014,7 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
               {/* A rate that could not be fetched used to pass in silence and
                   leave the position recorded at parity. */}
               {fxError && (
-                <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.5, color: C3.warning }}>{fxError}</div>
+                <div data-own-fail="quotes" style={{ marginTop: 8, fontSize: 12, lineHeight: 1.5, color: C3.warning }}>{fxError}</div>
               )}
             </div>
             {formProblem ? (

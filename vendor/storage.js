@@ -508,7 +508,9 @@ window.PortfolioStorage = {
   // Positions the change just made, taken back in one write (a refused
   // import's): true, or the refusal (_stopped) naming them when the browser
   // refused that as well -- they stay, without trades, and are shown.
-  takeBackHoldings(ids) {
+  // `said(n, named)`: the first half of the sentence when they could not
+  // be taken back, for a caller that is not the import (Add Position).
+  takeBackHoldings(ids, said) {
     const gone = new Set(ids || []);
     if (!gone.size) return true;
     const holdings = this.getHoldings();
@@ -519,8 +521,8 @@ window.PortfolioStorage = {
     const n = gone.size;
     // Nothing was written to put back: kept is empty, and the positions stay
     // as they were made. Said as that.
-    return this._stopped({ refused: failed.refused, kept: [this.KEYS.HOLDINGS] },
-      () => `No trades were imported, and the ${n} new position${n === 1 ? '' : 's'} the import made (${named.join(', ')}) could not be taken back, so ${n === 1 ? 'it stays' : 'they stay'} without trades: `);
+    return this._stopped({ refused: failed.refused, kept: [this.KEYS.HOLDINGS] }, said ? () => said(n, named)
+      : () => `No trades were imported, and the ${n} new position${n === 1 ? '' : 's'} the import made (${named.join(', ')}) could not be taken back, so ${n === 1 ? 'it stays' : 'they stay'} without trades: `);
   },
 
   getHoldingById(id) {
@@ -953,25 +955,37 @@ window.PortfolioStorage = {
    * Holdings whose portfolio is not in the list are invisible: the views ask
    * for holdings by portfolio id. That is the state an account was left in
    * when a default "My Portfolio" created before the load-time pull replaced
-   * the real one on the server: the holdings were still
-   * there, pointing at an id no portfolio had. Run on every load, this puts
-   * them back where they can be seen:
+   * the real one on the server, or by a restore the
+   * browser refused part way, its put-back refused too. Run on every
+   * load, this puts them back where they can be seen:
    *
-   *   1. the missing portfolio is in the server's copy (or this browser's own
-   *      copy from just before the pull) -- restore that record as it was;
-   *   2. everything else goes to ONE place: the account's only portfolio when
-   *      it has exactly one and holds none of the same names, otherwise a
-   *      single "Recovered positions" made for the purpose.
+   *   1. the missing portfolio is in the server's copy, this browser's own
+   *      copy from just before the pull, or the list kept before a restore
+   *      (RESTORE_KEPT) -- restore that record as it was: its id, name and
+   *      currency;
+   *   2. else the account's only portfolio takes them when it is of their
+   *      currency (or they name none) and holds none of their names -- the
+   *      default made before the pull on a new device (as
+   *      accepted);
+   *   3. what neither takes goes to "Recovered positions (EUR)", one such
+   *      portfolio per currency, made for the purpose (under a lost id) or
+   *      made by an earlier repair; one that holds the symbol already is not
+   *      used -- a second is made ("Recovered positions (USD) 2").
    *
-   * Only what this repair made is ever its own to fold: a portfolio carries
-   * `recovered: true` when this code created it. It used to go by name, so a
-   * portfolio the user had called "Recovered portfolio" was folded into
-   * another on the next load and a trade identical to one already there was
-   * dropped as a duplicate -- 20 AAPL became 10. Nothing is
-   * dropped now: a lost holding of a name the target already holds joins it
-   * with all of its trades. Returns what it did.
+   * Two positions are never merged into one, recovered portfolios are never
+   * folded together, and no position goes into a portfolio of another
+   * currency: the lost positions of Main and Euro book went into the
+   * restored backup's one portfolio, AAPL of the two became one position and
+   * SAP (EUR) sat in a USD portfolio, without a word
+   * (found now 2). What 1 and 3 did is said once (takeRecovered,
+   * 'portfolio:recovered'); 2 says nothing, as before. A portfolio this code
+   * made carries `recovered: true`. Returns what it did.
    */
   RECOVERED_NAME: 'Recovered positions',
+  // The portfolios list as it was before a restore wrote anything: the
+  // names and currencies a repair puts back when the restore stopped part
+  // way. Kept apart from the synced lists.
+  RESTORE_KEPT: 'eodhd_pt_portfolios_before_restore',
 
   repairOrphans() {
     // Nothing is judged from a list that cannot be read: an unreadable
@@ -987,99 +1001,142 @@ window.PortfolioStorage = {
       .filter(h => h.portfolioId && !known.has(h.portfolioId))
       .map(h => h.portfolioId))];
     const result = { restored: [], reattached: 0, recreated: [], merged: 0 };
+    if (!orphanIds.length) return result;
 
     const sync = window.DataSync || {};
     const fromServer = Array.isArray(sync._serverPortfolios) ? sync._serverPortfolios : [];
     const fromLocal = Array.isArray(sync._localPortfoliosBeforePull) ? sync._localPortfoliosBeforePull : [];
+    let fromRestore = [];
+    try { fromRestore = asArray(localStorage.getItem(this.RESTORE_KEPT)); } catch (_) { fromRestore = []; }
     const isRecord = (p) => p && typeof p === 'object' && typeof p.id === 'string';
     const findIn = (list, id) => list.find(p => isRecord(p) && p.id === id) || null;
 
     const lost = [];
+    const said = { restored: [], recreated: [], into: [] };
     orphanIds.forEach(id => {
-      const found = findIn(fromServer, id) || findIn(fromLocal, id);
-      if (found) { portfolios.push({ ...found }); known.add(id); result.restored.push(id); }
-      else lost.push(id);
+      const found = findIn(fromServer, id) || findIn(fromLocal, id) || findIn(fromRestore, id);
+      if (found) {
+        portfolios.push({ ...found });
+        known.add(id);
+        result.restored.push(id);
+        said.restored.push(String(found.name || 'Portfolio'));
+      } else lost.push(id);
     });
 
-    const isRecovered = (p) => p && p.recovered === true;
-    const recovered = portfolios.filter(isRecovered);
-    const real = portfolios.filter(p => !isRecovered(p));
-    const needsWork = lost.length > 0 || recovered.length > 1;
-    if (!needsWork) {
-      if (result.restored.length) this.savePortfolios(portfolios);
-      return result;
-    }
-
-    const lostSet = new Set(lost);
+    // A position's currency, as a portfolio's: pence are pounds.
+    const BASE = { GBX: 'GBP', GBP: 'GBP', ZAC: 'ZAR', ILA: 'ILS' };
+    const currencyOf = (h) => { const c = String((h && h.currency) || 'USD').toUpperCase(); return BASE[c] || c; };
+    const names = new Set(portfolios.map(p => p.name));
+    const nameFor = (cur) => {
+      const base = `${this.RECOVERED_NAME} (${cur})`;
+      let name = base;
+      for (let i = 2; names.has(name); i++) name = `${base} ${i}`;
+      names.add(name);
+      return name;
+    };
+    const now = this.getTimestamp();
+    const nextHoldings = holdings.slice();
     const symbolKey = (h) => (h.symbol ? `${h.type}|${h.symbol}` : null);
-    const heldIn = (pid) => new Set(holdings.filter(h => h.portfolioId === pid).map(symbolKey).filter(Boolean));
-
-    let target;
-    if (!recovered.length && real.length === 1) {
-      // The only portfolio takes them, unless it already holds one of the
-      // names: two histories of one symbol are not merged into the user's own
-      // portfolio behind their back.
-      const own = heldIn(real[0].id);
-      const clash = holdings.some(h => lostSet.has(h.portfolioId) && symbolKey(h) && own.has(symbolKey(h)));
-      if (!clash) target = real[0];
-    }
-    if (!target && recovered.length) target = recovered[0];
-    // One left from before the flag existed: put new orphans there rather than
-    // open a second portfolio of the same name beside it.
-    // It is not flagged or merged with anything -- nothing in it tells a
-    // portfolio this repair made from one the user named so.
-    if (!target) {
-      const named = real.find(p => p.name === this.RECOVERED_NAME);
-      const own = named ? heldIn(named.id) : null;
-      const clash = own && holdings.some(h => lostSet.has(h.portfolioId) && symbolKey(h) && own.has(symbolKey(h)));
-      if (named && !clash) target = named;
-    }
-    if (!target) {
-      const now = this.getTimestamp();
-      target = {
-        id: lost[0], name: this.RECOVERED_NAME, icon: 'barChart', color: '#f97316',
-        baseCurrency: 'USD', goal: null, createdAt: now, updatedAt: now, recovered: true,
-      };
-      portfolios.push(target);
-      result.recreated.push(target.id);
-    }
-
-    const folded = new Set(recovered.filter(p => p.id !== target.id).map(p => p.id));
-    const moving = new Set([...lost.filter(id => id !== target.id), ...folded]);
-
-    // Move the holdings; one holding per symbol in the target, every trade kept.
-    const bySymbol = new Map();
-    holdings.forEach(h => {
-      if (h.portfolioId === target.id && symbolKey(h)) bySymbol.set(symbolKey(h), h);
+    // Where a currency's lost positions may go: a portfolio a repair made
+    // in that currency, with the symbols it holds.
+    const places = [];
+    portfolios.filter(p => p && p.recovered === true).forEach(p => {
+      places.push({ p, cur: String(p.baseCurrency || 'USD').toUpperCase(), held: new Set(holdings.filter(h => h.portfolioId === p.id).map(symbolKey).filter(Boolean)) });
     });
-    const remap = new Map();       // dropped holding id -> kept holding id
-    const nextHoldings = [];
-    holdings.forEach(h => {
-      if (!moving.has(h.portfolioId)) { nextHoldings.push(h); return; }
-      result.reattached++;
-      const twin = symbolKey(h) ? bySymbol.get(symbolKey(h)) : null;
-      if (twin && twin.id !== h.id) { remap.set(h.id, twin.id); return; }
-      const moved = { ...h, portfolioId: target.id };
-      if (symbolKey(moved)) bySymbol.set(symbolKey(moved), moved);
-      nextHoldings.push(moved);
-    });
-
-    let txChanged = false;
-    let nextTx = null;
-    if (remap.size) {
-      nextTx = this.getTransactions().map(t => {
-        if (!remap.has(t.holdingId)) return t;
-        txChanged = true;
-        return { ...t, holdingId: remap.get(t.holdingId) };
+    const usedIds = new Set(portfolios.map(p => p.id));
+    // The account's only portfolio (not one a repair made) takes the lost
+    // positions of its currency, or of none named, unless it holds one of
+    // their names already -- then none of them. Of
+    // two lost positions of one name the second is not merged into the
+    // first: it goes on to a recovered portfolio.
+    const lostSet = new Set(lost);
+    // The only portfolio of the user's, for the lost positions of its own
+    // currency. A recovered portfolio of that currency holding positions
+    // makes two of it: then it takes none. One of another currency never
+    // stops it: SAP's EUR portfolio, made by a repair stopped before the
+    // positions were written, sent NVDA (USD) to a new USD portfolio instead
+    // of Main on the next load. Recovered ones
+    // left empty do not count either.
+    const users = portfolios.filter(p => p.recovered !== true);
+    const only = users.length === 1 ? users[0] : null;
+    const taken = new Set();
+    const twinOf = (base) => portfolios.some(p => p.recovered === true && currencyOf({ currency: p.baseCurrency }) === base
+      && holdings.some(h => h.portfolioId === p.id));
+    if (only && !twinOf(currencyOf({ currency: only.baseCurrency }))) {
+      const base = currencyOf({ currency: only.baseCurrency });
+      const own = new Set(holdings.filter(h => h.portfolioId === only.id).map(symbolKey).filter(Boolean));
+      const fit = holdings.filter(h => lostSet.has(h.portfolioId) && (!h.currency || currencyOf(h) === base));
+      if (!fit.some(h => symbolKey(h) && own.has(symbolKey(h)))) {
+        fit.forEach(h => {
+          const k = symbolKey(h);
+          if (k && own.has(k)) return;
+          if (k) own.add(k);
+          taken.add(h.id);
+          nextHoldings[nextHoldings.indexOf(h)] = { ...h, portfolioId: only.id };
+          result.reattached++;
+        });
+      }
+    }
+    lost.forEach(id => {
+      const mine = holdings.filter(h => h.portfolioId === id && !taken.has(h.id));
+      // Its currencies, the most held first.
+      const counts = new Map();
+      mine.forEach(h => { counts.set(currencyOf(h), (counts.get(currencyOf(h)) || 0) + 1); });
+      [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a)).forEach(cur => {
+        const group = mine.filter(h => currencyOf(h) === cur);
+        const keys = group.map(symbolKey).filter(Boolean);
+        let place = places.find(x => x.cur === cur && !keys.some(k => x.held.has(k)));
+        if (!place) {
+          // Made under the lost id while it is free and the whole lost set
+          // stays in it: its positions need no write. A set of more than one
+          // currency (or with some taken elsewhere) never gives its id to
+          // one of them: had the positions' write been refused, SAP (EUR)
+          // stayed on the id of a USD portfolio for good. On a new id, a refused write leaves the positions
+          // without a portfolio, and the next load finishes the repair.
+          const whole = group.length === holdings.filter(h => h.portfolioId === id).length;
+          const pid = usedIds.has(id) || !whole ? this.generateId() : id;
+          usedIds.add(pid);
+          const made = {
+            id: pid, name: nameFor(cur), icon: 'barChart', color: '#f97316',
+            baseCurrency: cur, goal: null, createdAt: now, updatedAt: now, recovered: true,
+          };
+          portfolios.push(made);
+          result.recreated.push(pid);
+          said.recreated.push(made.name);
+          place = { p: made, cur, held: new Set() };
+          places.push(place);
+        } else if (said.recreated.indexOf(place.p.name) === -1 && said.into.indexOf(place.p.name) === -1) {
+          said.into.push(place.p.name);
+        }
+        keys.forEach(k => { place.held.add(k); });
+        group.forEach(h => {
+          if (h.portfolioId === place.p.id) return;
+          const at = nextHoldings.indexOf(h);
+          nextHoldings[at] = { ...h, portfolioId: place.p.id };
+          result.reattached++;
+        });
       });
-    }
+    });
 
-    const nextPortfolios = portfolios.filter(p => !folded.has(p.id));
-    result.merged = folded.size;
-    this.savePortfolios(nextPortfolios);
-    if (result.reattached) this.saveHoldings(nextHoldings);
-    if (txChanged) this.saveTransactions(nextTx);
+    // The portfolios first, then the positions: stopped between the two,
+    // the positions are still without a portfolio, and the next load uses
+    // the recovered portfolios made here (`places`) rather than make more.
+    if (!this.savePortfolios(portfolios)) return result;
+    if (result.reattached && !this.saveHoldings(nextHoldings)) return result;
+    // Said once, when the writes held: the tracker's line (takeRecovered) --
+    // not for what the only portfolio took, which shows as it was.
+    if (said.restored.length || said.recreated.length || said.into.length) {
+      this._recovered = said;
+      try { window.dispatchEvent(new CustomEvent('portfolio:recovered', { detail: said })); } catch (_) { /* a courtesy */ }
+    }
     return result;
+  },
+  // What the last repair put back, for the tracker's one line, once; null
+  // when it did nothing.
+  takeRecovered() {
+    const r = this._recovered || null;
+    this._recovered = null;
+    return r;
   },
 
   initialize() {
@@ -1287,6 +1344,10 @@ window.PortfolioStorage = {
   restoreBackup(backup) {
     const { data, portfolios, holdings, transactions } = this._readBackup(backup);
     const before = this.rawSnapshot();
+    // The portfolios as they are, kept apart first: a restore that stops
+    // part way leaves positions pointing at them, and the repair on the
+    // next load puts them back under their names and currencies.
+    try { localStorage.setItem(this.RESTORE_KEPT, JSON.stringify(this.getPortfolios())); } catch (_) { /* the repair names them "Recovered" then */ }
     // A restore replaces the whole set on purpose: it is a way out of an
     // unreadable key, so the guard against writing over one stands aside.
     this._overwriting = true;
@@ -1295,6 +1356,7 @@ window.PortfolioStorage = {
       ok = this.savePortfolios(portfolios) && this.saveHoldings(holdings) && this.saveTransactions(transactions)
         && (!data.settings || typeof data.settings !== 'object' || this.saveSettings(data.settings));
     } finally { this._overwriting = false; }
+    if (ok) { try { localStorage.removeItem(this.RESTORE_KEPT); } catch (_) { /* kept: only read for positions with no portfolio */ } }
     if (!ok) {
       // Put back what was there; a half-restored set is worse than none.
       // A put-back the browser refuses as well is said, and the screen reads

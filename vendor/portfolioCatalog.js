@@ -165,7 +165,7 @@ window.PortfolioCatalogView = ({ apiKey, theme, onAdopt, onClose, onOpenPortfoli
     focusNext(() => document.querySelector('[data-adopt-for="' + String(key).replace(/"/g, '') + '"]'));
   };
   // One registration: Escape on the web, the Telegram BackButton in the Mini
-  // App (useEscLayer goes on its stack there; 20.10 F1: the question was an
+  // App (useEscLayer goes on its stack there; the question was an
   // Esc layer on the web only, and Desktop's Esc closed the whole catalog).
   (window.useEscLayer || (() => {}))(adoptAsk != null, cancelAdoptAsk);
   const backRef = React.useRef(null);
@@ -494,7 +494,7 @@ window.PortfolioCatalogView = ({ apiKey, theme, onAdopt, onClose, onOpenPortfoli
       // and a Try again that counts the wait down. They read "holdings
       // unavailable" and were never asked again in the session.
       t.category === 'fund' && t._holdingsState === 'failed' && window.RateLimitWait && React.createElement(window.RateLimitWait.FailNote, {
-        what: 'The holdings', failure: t._holdingsFailure, isDark, panel: 'fund-holdings:' + (t.fundTicker || t.id),
+        what: 'The holdings', failure: t._holdingsFailure, isDark, panel: 'fund-holdings:' + (t.fundTicker || t.id), ownFail: 'fundamentals',
         onRetry: () => setHoldingsTry((n) => n + 1), style: { marginBottom: 20 },
       }),
       // Holdings table

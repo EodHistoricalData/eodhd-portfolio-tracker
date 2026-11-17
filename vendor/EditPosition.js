@@ -407,7 +407,7 @@ window.EditPositionModal = ({ holding, holdingData, baseCurrency, onClose, onSav
               </div>
             )}
             {rateError && (
-              <div style={{ marginBottom: 12, fontSize: 12, lineHeight: 1.5, color: C3.warning }}>{rateError}</div>
+              <div data-own-fail="quotes" style={{ marginBottom: 12, fontSize: 12, lineHeight: 1.5, color: C3.warning }}>{rateError}</div>
             )}
 
             {/* New Quantity */}

@@ -125,11 +125,19 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
   // The held positions with no value, by ticker and why (Calc.unpricedLine),
   // or '': the currency and the reason did not say which positions fell out
   // once there were several.
+  // Refused for the key or the day under a host's own panel: only that the
+  // prices did not load, pointing at it (Calc.pricesUnderPanel).
+  const unpricedPanel = React.useMemo(() => {
+    const PC = window.PortfolioCalculations;
+    const rows = (holdings || []).map(h => holdingsData?.[h.id]).filter(Boolean);
+    return Boolean(PC && PC.pricesUnderPanel && PC.pricesUnderPanel(rows));
+  }, [holdings, holdingsData]);
   const unpricedWhy = React.useMemo(() => {
     const PC = window.PortfolioCalculations;
     const rows = (holdings || []).map(h => holdingsData?.[h.id]).filter(Boolean);
+    if (unpricedPanel) return PC.pricesPanelLine(rows, rows.some(r => !r.priceUnavailable && Number(r.quantity) > 0));
     return PC && PC.unpricedLine ? PC.unpricedLine(rows, baseCurrency || 'USD') : PC && PC.unpricedWhy ? PC.unpricedWhy(rows, baseCurrency || 'USD') : '';
-  }, [holdings, holdingsData, baseCurrency]);
+  }, [holdings, holdingsData, baseCurrency, unpricedPanel]);
   const heldSymbols = React.useMemo(() => [...new Set(
     holdings.filter(h => h.symbol && holdingsData?.[h.id] && !holdingsData[h.id].priceUnavailable && Number(holdingsData[h.id].quantity) > 0).map(h => h.symbol)
   )], [holdings, holdingsData]);
@@ -281,6 +289,9 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
   const simulate = async (opts) => {
     if (scenarios.length === 0) return;
     const auto = Boolean(opts && opts.auto);
+    // A press of Simulate is the person acting: its run, at the limit, may
+    // be made again once more (RateLimitWait's budget).
+    if (!auto && window.RateLimitWait && typeof window.RateLimitWait.acted === 'function') window.RateLimitWait.acted('whatif-simulate');
     const run = ++runRef.current;
     setLoading(true);
     setAiVerdict(null);
@@ -656,9 +667,9 @@ Diversification score: ${Math.round(result.diversificationScore)}/100 (effective
               with Try again -- "Before" read $480 for a $94,000 portfolio
               when its GBP/USD rate failed. */}
           {unpricedWhy && (
-            <div data-unpriced-why="true" data-own-fail="quotes" style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
-              <span role="status">{unpricedWhy} The totals leave out the positions without a value.</span>
-              {onRetryPrices && (
+            <div data-unpriced-why="true" data-own-fail="quotes" data-see-panel={unpricedPanel ? 'true' : undefined} style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+              <span role="status">{unpricedPanel ? unpricedWhy : unpricedWhy + ' The totals leave out the positions without a value.'}</span>
+              {onRetryPrices && !unpricedPanel && (
                 <window.RateLimitWait.RetryButton busyKey="prices" isDark={isDark} onClick={onRetryPrices} style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 4, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'Sora', sans-serif" }} />
               )}
             </div>

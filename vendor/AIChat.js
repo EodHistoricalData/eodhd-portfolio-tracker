@@ -663,9 +663,9 @@ window.AIChatView = ({ holdings, holdingsData, watchlist, watchlistData, onClose
         const retry = () => sendMessage(initialPrompt);
         if (blocked.status === 'failed') {
           return (
-            <div data-ai-blocked="failed" style={box}>
+            <div data-ai-blocked="failed" data-own-fail="ai-data" style={box}>
               {RLW && RLW.FailNote
-                ? React.createElement(RLW.FailNote, { what: blocked.what, failure: blocked.failure, isDark, autoRetry: false, onRetry: retry, extra: NOT_ASKED, ownFocus: true })
+                ? React.createElement(RLW.FailNote, { what: blocked.what, failure: blocked.failure, isDark, autoRetry: false, onRetry: retry, extra: NOT_ASKED, ownFocus: true, ownFail: 'ai-data' })
                 : <span role="status">{`${blocked.what || 'The data'} did not load. ${NOT_ASKED}`}</span>}
             </div>
           );
@@ -673,7 +673,7 @@ window.AIChatView = ({ holdings, holdingsData, watchlist, watchlistData, onClose
         if (blocked.status === 'plan') {
           const Card = window.PlanNotice && window.PlanNotice.RefusalCard;
           return (
-            <div data-ai-blocked="plan" style={{ margin: '0 16px 8px' }}>
+            <div data-ai-blocked="plan" data-own-fail="ai-data" style={{ margin: '0 16px 8px' }}>
               {Card ? React.createElement(Card, { refusal: blocked.refusal, subject: blocked.subject, isDark }) : <div role="alert" style={box}>{`${blocked.subject || 'This data'} is not included in your plan.`}</div>}
               <div style={{ fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{NOT_ASKED}</div>
               {/* The server refused it when fetched, or the plan check passes

@@ -18,58 +18,13 @@ window.APP_META = {
     "eodhd_ai_chat",
     "eodhd_timezone_manual"
   ],
-  "ownFailures": [
-    "getBatchRealTime",
-    "getRealTimeData",
-    "getForexRate",
-    "getHistoricalData",
-    "getMacroIndicator",
-    "getInsiderForm4",
-    "getFundamentals"
-  ],
-  "ownLines": {
-    "getBatchRealTime": [
-      "[data-own-fail=\"quotes\"]:not([data-pt-price-status])",
-      "[data-pt-price-status]~without a price|no price|No prices came back",
-      "[data-unpriced-why]",
-      "[data-risk-none-priced]",
-      "[data-rl-fail]~prices? did not load"
-    ],
-    "getRealTimeData": [
-      "[data-own-fail=\"quotes\"]:not([data-pt-price-status])",
-      "[data-pt-price-status]~without a price|no price|No prices came back",
-      "[data-own-fail=\"macro\"]",
-      "[data-unpriced-why]",
-      "[data-risk-none-priced]",
-      "[data-rl-fail]~prices? did not load|economic data|figures",
-      "[data-import-check]~did not load|Could not check",
-      "~Could not check|price did not load"
-    ],
-    "getForexRate": [
-      "[data-own-fail=\"quotes\"]:not([data-pt-price-status])",
-      "[data-pt-price-status]~without a price|no price|No prices came back",
-      "[data-unpriced-why]",
-      "~rate did not load"
-    ],
-    "getHistoricalData": [
-      "[data-own-fail=\"history\"]",
-      "[data-rl-fail]~price history",
-      "[data-import-check]~did not load",
-      "~(close for|comparison).{0,80}did not load"
-    ],
-    "getMacroIndicator": [
-      "[data-own-fail=\"macro\"]",
-      "[data-rl-fail]~economic data|figures"
-    ],
-    "getInsiderForm4": [
-      "[data-own-fail=\"insider\"]",
-      "[data-rl-fail]~insider"
-    ],
-    "getFundamentals": [
-      "[data-own-fail=\"fundamentals\"]",
-      "[data-rl-fail]~Fundamentals did not load|sectors|earnings"
-    ]
-  }
+  "lineKinds": [
+    "quotes",
+    "history",
+    "macro",
+    "insider",
+    "fundamentals"
+  ]
 };
 
 if (!window.React || !window.ReactDOM) {

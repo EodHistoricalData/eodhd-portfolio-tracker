@@ -1188,11 +1188,11 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
           {stopped.length > 0 && !importing && (
             <div data-import-check="" style={{ marginBottom: 12 }}>
               {window.RateLimitWait && window.RateLimitWait.FailNote
-                ? <window.RateLimitWait.FailNote failure={stopFailure} text={stopWords} label="Check again" onRetry={checkAgain}
+                ? <window.RateLimitWait.FailNote ownFail="quotes history" failure={stopFailure} text={stopWords} label="Check again" onRetry={checkAgain}
                     onReload={autoRecheck || undefined} autoRetry={Boolean(autoRecheck)} panel={RECHECK_BUSY} busyKey={RECHECK_BUSY} isDark={isDark}
                     style={{ fontSize: 12, color: C3.warning }} />
                 : (
-                  <div style={{ fontSize: 12, lineHeight: 1.5, color: C3.warning }}>
+                  <div data-own-fail="quotes history" style={{ fontSize: 12, lineHeight: 1.5, color: C3.warning }}>
                     <span role="status">{stopWords}</span>
                     <button type="button" onClick={checkAgain} disabled={rechecking} style={{ marginLeft: 8 }}>Check again</button>
                   </div>
