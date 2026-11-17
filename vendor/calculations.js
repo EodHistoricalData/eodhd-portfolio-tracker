@@ -596,36 +596,6 @@ window.PortfolioCalculations = {
     return holdingsWithData.reduce((total, h) => total + (h.currencyPnL || 0), 0);
   },
 
-  // ==================== P&L BREAKDOWN ====================
-
-  /**
-   * Calculate price P&L vs currency P&L
-   * Price P&L: gain from asset price changes (in original currency)
-   * Currency P&L: gain from exchange rate changes
-   */
-  getPnLBreakdown(holding, transactions, currentPrice, currentExchangeRate, purchaseExchangeRate) {
-    const quantity = this.getHoldingQuantity(transactions);
-    const { totalCost } = this.getCostBasis(transactions);
-
-    // Value at current price in original currency
-    const valueInOriginalCurrency = quantity * currentPrice;
-
-    // Cost in original currency (before FX)
-    const costInOriginalCurrency = totalCost / purchaseExchangeRate;
-
-    // Price P&L (in base currency at current FX)
-    const pricePnL = (valueInOriginalCurrency - costInOriginalCurrency) * currentExchangeRate;
-
-    // Currency P&L (change in FX rate applied to original value)
-    const currencyPnL = costInOriginalCurrency * (currentExchangeRate - purchaseExchangeRate);
-
-    return {
-      pricePnL,
-      currencyPnL,
-      totalPnL: pricePnL + currencyPnL
-    };
-  },
-
   /**
    * Calculate dividend income
    */
