@@ -1233,7 +1233,11 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   const noneValued = openUnpriced.length > 0 && !pricedHoldings.some(h => Number(h.quantity) > 0);
   // The limit is named only when it is why the prices are missing: a wait
   // another request started later leaves "No prices came back." as it was.
-  const pricesLimited = RLW.useCause(!loading && unpricedCount > 0 ? holdingsData : null);
+  // And after the wait too, when the prices' own failure was the limit: the
+  // line read "No prices came back." with no cause once the wait was over,
+  // while the GBX/USD rate and the cards below still named the limit.
+  const pricesLimited = RLW.useCause(!loading && unpricedCount > 0 ? holdingsData : null)
+    || Boolean(!loading && unpricedCount > 0 && pricesFail && pricesFail.limited);
   // Prices the limit stopped are asked again by themselves once its wait is
   // over, as the panels around them are (RateLimitWait.useReloadAfterWait):
   // the table kept KO at N/A with an active Try again and sent nothing in

@@ -724,8 +724,11 @@ window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClo
                 <div style={styles.muted}>Sectors</div>
               </div>
             </div>
+            {/* The same panel as By Sector's line: one fundamentals failure,
+                one repeat after the wait, whichever of the two lines is on
+                the page. Each had its own, and one failure was asked twice. */}
             {sectorsMissed && (
-              <window.RateLimitWait.FailNote panel="health-sectors" ownFail="fundamentals" sayPanel what="Fundamentals" failure={sectorsMissed.failure} text={PF.missedText(sectorsMissed)}
+              <window.RateLimitWait.FailNote panel="portfolio-sectors" ownFail="fundamentals" sayPanel what="Fundamentals" failure={sectorsMissed.failure} text={PF.missedText(sectorsMissed)}
                 onRetry={() => askSectorsAgain(new Set(sectorsMissed.symbols))} onReload={() => askSectorsAgain()} isDark={isDark}
                 style={{ margin: '8px 0 0', fontSize: 12, ...styles.muted }} buttonStyle={{ fontFamily: "'Sora', sans-serif" }} />
             )}

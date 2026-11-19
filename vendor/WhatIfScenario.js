@@ -335,7 +335,7 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
             const last = e && e.rateLimited && window.EODHD_API.lastQuote ? window.EODHD_API.lastQuote(sc.symbol) : null;
             if (!last) {
               const f = seen(RLW.outage(e || {}));
-              quotes[sc.symbol] = { error: f ? failedLine(f) : 'Could not fetch price' };
+              quotes[sc.symbol] = { error: f ? failedLine(f) : 'Could not fetch price', failed: Boolean(f) };
               continue;
             }
             quote = last;
@@ -343,20 +343,29 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
           const px = Calc.toRate(quote?.close) ?? Calc.toRate(quote?.previousClose);
           const ccy = symbolCurrency.current[sc.symbol] || Calc.currencyFromSymbol(sc.symbol);
           // No quote at the limit is said so, not "Could not fetch price".
-          if (px == null) { quotes[sc.symbol] = { error: quote == null && seen(RLW.failure(null)).limited ? failedLine(RLW.failure(null)) : 'Could not fetch price' }; continue; }
+          if (px == null) {
+            const held = quote == null && seen(RLW.failure(null)).limited;
+            quotes[sc.symbol] = { error: held ? failedLine(RLW.failure(null)) : 'Could not fetch price', failed: held };
+            continue;
+          }
           if (!ccy) { quotes[sc.symbol] = { error: 'Unknown quote currency — pick the symbol from search' }; continue; }
           const fxFails = [];
           const fx = await Calc.fxRate(apiKey, ccy, base, fxFails);
           const fxFailed = fx ? null : seen(Calc.fxFailure(fxFails));
           quotes[sc.symbol] = fx ? { price: px * fx, currency: ccy }
-            : { error: fxFailed ? `The ${ccy}/${base} rate did not load: ${RLW.failReason(fxFailed)} Simulate again.` : `No ${ccy}/${base} rate` };
+            : { error: fxFailed ? `The ${ccy}/${base} rate did not load: ${RLW.failReason(fxFailed)} Simulate again.` : `No ${ccy}/${base} rate`, failed: Boolean(fxFailed) };
         } catch (e) {
           const f = seen(RLW.outage(e || {}));
-          quotes[sc.symbol] = { error: f ? failedLine(f) : 'Could not fetch price' };
+          quotes[sc.symbol] = { error: f ? failedLine(f) : 'Could not fetch price', failed: Boolean(f) };
         }
       }
 
       const r = Calc.whatIfSimulate({ holdings, holdingsData, scenarios, quotes, types: symbolType.current });
+      // The tickers whose price or rate failed to load (a reason in their
+      // words, not "Could not fetch price"): their change line names that
+      // failure itself (data-own-fail), so the open apps' panel does not say
+      // it again above the tab.
+      r.priceFailed = Object.keys(quotes).filter(sym => quotes[sym] && quotes[sym].failed);
       // More than is held: all of it, and the asked amount beside it.
       const capNote = (c) => (c.capped ? ` — all of it (${fmtBase(c.value)} held, ${fmtBase(c.amount)} asked)` : '');
       r.changes = r.changes.map(c => c.error ? c : {
@@ -656,7 +665,7 @@ Diversification score: ${Math.round(result.diversificationScore)}/100 (effective
           <div style={cardStyle}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Changes Applied</div>
             {result.changes.map((c, i) => (
-              <div key={i} style={{ fontSize: 12, padding: '4px 0', opacity: c.error ? 0.5 : 0.8 }}>
+              <div key={i} data-own-fail={c.error && (result.priceFailed || []).indexOf(c.symbol) !== -1 ? 'quotes' : undefined} style={{ fontSize: 12, padding: '4px 0', opacity: c.error ? 0.5 : 0.8 }}>
                 {c.error ? `\u26A0 ${c.symbol}: ${c.error}` : `\u2713 ${c.action}`}
               </div>
             ))}
