@@ -95,7 +95,7 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
   // after a pick the results stayed in state and the first Esc or Back on
   // Transaction Details cleared that invisible list.
   const matchesShown = step === 1 && assetType !== 'manual' && !searching && searchResults.length > 0;
-  (window.useEscLayer || (() => {}))(matchesShown, () => setSearchResults([]));
+  (window.useEscLayer || (() => {}))(matchesShown, () => dismissSearch());
   const [selectedAsset, setSelectedAsset] = React.useState(initialAsset);
   // The company name for a symbol handed in from the asset page: it arrives
   // as a bare code, and the card read "MCD / MCD". Kept apart from
@@ -223,13 +223,23 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
   // Enter on "ZZZQQ" or "VOD.L" with no rows did nothing and said nothing.
   // Only the newest search speaks.
   const [answeredFor, setAnsweredFor] = React.useState(null);
-  const searchSeqRef = React.useRef(0);
+  // The field's turns (SymbolCode.searchTurns): a keystroke, the type
+  // chips, a pick or Escape starts a new one at once -- not when the typing
+  // pause ends: AA's answer that came before AAPL's search went out was
+  // shown under AAPL. An older turn's answer and failure are dropped, its
+  // loading ends with it, and its request is idle.
+  const turns = window.SymbolCode.useSearchTurns();
+  const endSearch = () => { turns.next(); setSearching(false); };
+  const dismissSearch = () => { endSearch(); setSearchResults([]); };
   // The text whose search failed: its empty list is no answer.
   const searchFailedForRef = React.useRef(null);
   const resultsKbRef = React.useRef(null);
-  const handleSearch = async () => {
+  // `turn`: the field's turn this search answers (the change that asked
+  // for it); a Try again asks again in a turn of its own.
+  const handleSearch = async (turn) => {
     if (!searchQuery.trim() || assetType === 'manual') return;
-    const seq = ++searchSeqRef.current;
+    const t = turn || turns.next();
+    if (!turns.live(t)) return;
     const asked = searchQuery;
     setSearching(true);
     let shown = [];
@@ -241,7 +251,10 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
     try {
       // The code alone for Yahoo's suffix: search/VOD.L answers nothing,
       // search/VOD answers VOD.LSE (window.SymbolCode.searchText).
-      const results = (await window.EODHD_API.searchStocks(apiKey, SC && SC.searchText ? SC.searchText(asked) : asked, { throwErrors: true })) || [];
+      // turns.ask(): idle once its turn is over (the open apps' shell then
+      // says its failure nowhere); while wanted, its failure is the field's
+      // line, not the panel's too. The terminal's client ignores both.
+      const results = (await window.EODHD_API.searchStocks(apiKey, SC && SC.searchText ? SC.searchText(asked) : asked, turns.ask(t))) || [];
 
       // Filter by selected type, or show all
       const filtered = assetType === 'all' ? results : results.filter(r => {
@@ -255,9 +268,12 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
     } catch (e) {
       if (!(e && e.rateLimited)) console.error('Search error:', e);
       thrown = e;
-      failed = SC && SC.searchFailNote ? SC.searchFailNote(e, SC.apiFor(window.EODHD_API, apiKey).limited()) : 'The ticker search did not load. Try again.';
+      // Worded when drawn (SymbolCode.late): a refused key points to the
+      // host's panel only while it is up.
+      const left = SC.apiFor(window.EODHD_API, apiKey).limited();
+      failed = SC && SC.searchFailNote ? SC.late(() => SC.searchFailNote(e, left)) : 'The ticker search did not load. Try again.';
     }
-    if (seq !== searchSeqRef.current) return;
+    if (!turns.live(t)) return;
     searchFailedForRef.current = failed ? asked : null;
     setSearchResults(shown);
     setAnsweredFor(asked);
@@ -271,14 +287,15 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
 
   React.useEffect(() => {
     setAnsweredFor(null);
+    // The change is a new turn now; the search before it is over.
+    const t = turns.next();
+    setSearching(false);
     if (searchQuery.length >= 2 && assetType !== 'manual') {
-      const timer = setTimeout(handleSearch, 300);
+      const timer = setTimeout(() => handleSearch(t), 300);
       return () => clearTimeout(timer);
-    } else {
-      searchSeqRef.current++;
-      setSearchResults([]);
-      setSearching(false);
     }
+    setSearchResults([]);
+    return undefined;
   }, [searchQuery, assetType]);
 
   // Prefill from asset detail "+" Portfolio button — skip straight to transaction step.
@@ -297,7 +314,7 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
     // effect below will run on first render to fetch the price.
     let gone = false;
     const isUS = (ex) => ['US', 'NYSE', 'NASDAQ', 'AMEX', 'BATS', 'NYSE ARCA'].indexOf(String(ex || '').toUpperCase()) !== -1;
-    const search = Promise.resolve(window.EODHD_API && window.EODHD_API.searchStocks ? window.EODHD_API.searchStocks(apiKey, code, { throwErrors: true }) : []);
+    const search = Promise.resolve(window.EODHD_API && window.EODHD_API.searchStocks ? window.EODHD_API.searchStocks(apiKey, code, { throwErrors: true, code: true }) : []);
     // No answer in time: the user is asked; an answer that comes later still
     // fills the type and name in. The time counts from when the search is
     // sent: inside a 429's wait the Mini App's client holds it and asks
@@ -357,7 +374,10 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
           // The history did not load: said with its reason, not as a day
           // with no price.
           setTxPrice('');
-          setPriceNote(`the close for ${date} did not load: ${window.RateLimitWait.failReason(c.failed)} Enter what you paid.`);
+          // Worded when drawn (SymbolCode.late): a refused key points to
+          // the host's panel only while it is up.
+          const why = c.failed;
+          setPriceNote(window.SymbolCode.late(() => `the close for ${date} did not load: ${window.RateLimitWait.failReason(why)} Enter what you paid.`));
         } else {
           // No close on record for that day (a 1975 buy): today's price
           // stayed in the field and the trade was saved at it with no word.
@@ -445,6 +465,8 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
     // A pick ends what an Enter left out: its late answer (VOD.LSE) must not
     // replace this row (VOD.US).
     if (resultsKb && resultsKb.cancel) resultsKb.cancel();
+    // And the search still out: its late answer opens nothing.
+    endSearch();
     const ccy = listingCurrencyOf(picked);
     if (!ccy) { if (resultsKb && resultsKb.say) resultsKb.say(unknownCurrencyNote(picked)); return; }
     const asset = { ...picked, Currency: ccy };
@@ -482,7 +504,7 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
       ? { ...res.row, Name: res.row.Code, Currency: listingCurrencyOf(res.row) }
       : res.row),
   }) : undefined;
-  const resultsKb = useComboboxKeys({ items: searchResults, open: matchesShown, onPick: handleSelectAsset, listId: 'pt-addpos-results', query: searchQuery, codeOf: (r) => r.Code, isDark, answered: answeredFor, resolve: resolveTyped, search: () => handleSearch() });
+  const resultsKb = useComboboxKeys({ items: searchResults, open: matchesShown, onPick: handleSelectAsset, listId: 'pt-addpos-results', query: searchQuery, codeOf: (r) => r.Code, isDark, answered: answeredFor, resolve: resolveTyped, search: () => handleSearch(), onDismiss: dismissSearch });
   resultsKbRef.current = resultsKb;
 
   // Said under the field, not with the browser's alert().
@@ -727,7 +749,8 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
         savingRef.current = false;
         setSaving(false);
         const notTaken = `The position was not saved: your account did not take it (${sync.error}).`;
-        if (!undo) setSyncError(`${notTaken} Check the connection and try again.`);
+        if (!undo && sync.refusal) setLimitCard(sync.refusal);
+        else if (!undo) setSyncError(`${notTaken} Check the connection and try again.`);
         else if (undo.partial) setSyncError(`${notTaken} ${undo.message}`);
         else {
           setSyncError(`${notTaken} It could not be taken back on this device either, so it stays here as entered: ${String((undo && undo.message) || 'the data could not be saved.').replace(/^./, c => c.toLowerCase())}`);
@@ -987,7 +1010,7 @@ window.AddPositionModal = ({ portfolioId: openedFor, apiKey, baseCurrency: opene
               <input id="pt-addpos-qty" {...(window.NumberInput ? window.NumberInput.fieldProps : { type: 'number' })} placeholder={selectedAsset.isManual ? 'e.g. 1' : selectedAsset.Exchange === 'CC' ? 'e.g. 0.5' : 'e.g. 10'} value={txQuantity} onChange={(e) => setTxQuantity(e.target.value)} style={styles.input} />
             </div>
             <div>
-              <label style={styles.label} htmlFor="pt-addpos-price">{(selectedAsset.isManual ? 'Total Value' : 'Price per unit') + (selectedAsset.Currency ? ` (${selectedAsset.Currency})` : '')}{priceNote && <span data-own-fail="history" style={{ fontWeight: 400 }}> · {priceNote}</span>}</label>
+              <label style={styles.label} htmlFor="pt-addpos-price">{(selectedAsset.isManual ? 'Total Value' : 'Price per unit') + (selectedAsset.Currency ? ` (${selectedAsset.Currency})` : '')}{priceNote && <span data-own-fail="history" style={{ fontWeight: 400 }}> · {window.SymbolCode.words(priceNote)}</span>}</label>
               <input id="pt-addpos-price" {...(window.NumberInput ? window.NumberInput.fieldProps : { type: 'number' })} placeholder="e.g. 150.00" value={txPrice} onChange={(e) => { priceTypedRef.current = true; setPriceNote(null); setTxPrice(e.target.value); }} style={styles.input} />
             </div>
             {!selectedAsset.isManual && (

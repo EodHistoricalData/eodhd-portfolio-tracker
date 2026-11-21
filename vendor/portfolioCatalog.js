@@ -21,7 +21,7 @@ window.PortfolioFillNames = async (portfolioId, apiKey, tries) => {
     const ex = sym.split('.').slice(1).join('.') || 'US';
     if (!code || (h.name && h.name.toUpperCase() !== code)) continue;
     try {
-      const rows = await API.searchStocks(apiKey, code, { throwErrors: true });
+      const rows = await API.searchStocks(apiKey, code, { throwErrors: true, code: true });
       const hit = Array.isArray(rows) && rows.find((r) => r && String(r.Code || '').toUpperCase() === code
         && (String(r.Exchange || '').toUpperCase() === ex || (usLike(ex) && usLike(r.Exchange))));
       if (hit && hit.Name && hit.Name.toUpperCase() !== code) {

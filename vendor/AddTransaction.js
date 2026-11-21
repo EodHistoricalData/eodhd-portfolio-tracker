@@ -20,6 +20,9 @@ window.AddTransactionModal = ({ holding, baseCurrency, onClose, onSave, theme, t
   const [fxNote, setFxNote] = React.useState(null);
   const [loadingFX, setLoadingFX] = React.useState(false);
   const [formError, setFormError] = React.useState(null);
+  // A failure's words follow the host's panel (SymbolCode.late): drawn
+  // again when it comes or goes.
+  ((window.RateLimitWait && window.RateLimitWait.useHostPanel) || (() => {}))();
   const [closeLoading, setCloseLoading] = React.useState(false);
 
   const Storage = window.PortfolioStorage;
@@ -190,7 +193,9 @@ window.AddTransactionModal = ({ holding, baseCurrency, onClose, onSave, theme, t
     setCloseLoading(false);
     if (close && close.close > 0) setTxPrice(String(close.close));
     // The history did not load: its reason, not "no close".
-    else if (close && close.failed) setFormError(`The close for ${holding.symbol} on ${txDate} did not load: ${window.RateLimitWait.failReason(close.failed)} Enter the cost per share yourself, or try the market close again.`);
+    // Worded when drawn (SymbolCode.late): a refused key points to the
+    // host's panel only while it is up.
+    else if (close && close.failed) { const why = close.failed; setFormError(window.SymbolCode.late(() => `The close for ${holding.symbol} on ${txDate} did not load: ${window.RateLimitWait.failReason(why)} Enter the cost per share yourself, or try the market close again.`)); }
     else setFormError(`No close for ${holding.symbol} on or before ${txDate} — enter the cost per share yourself.`);
   };
 
@@ -536,7 +541,7 @@ window.AddTransactionModal = ({ holding, baseCurrency, onClose, onSave, theme, t
       </div>
 
       {formError && (
-        <div role="alert" data-own-fail={/did not load/.test(formError) ? 'history' : undefined} style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, fontSize: 13, lineHeight: 1.5, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', color: C3.error }}>{formError}</div>
+        <div role="alert" data-own-fail={/did not load/.test(window.SymbolCode.words(formError)) ? 'history' : undefined} style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, fontSize: 13, lineHeight: 1.5, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', color: C3.error }}>{window.SymbolCode.words(formError)}</div>
       )}
 
       {/* Save Button */}

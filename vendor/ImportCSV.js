@@ -227,7 +227,7 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
   const search = async (q, fails, alive) => {
     if (alive && !alive()) return null;
     try {
-      const hits = await window.EODHD_API.searchStocks(apiKey, q, { throwErrors: true });
+      const hits = await window.EODHD_API.searchStocks(apiKey, q, { throwErrors: true, code: true });
       return Array.isArray(hits) ? hits : [];
     } catch (e) { if (fails) fails.push(e); return null; }
   };
@@ -818,7 +818,9 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
       const txRate = await rateFor(txCurrency, row.date);
       if (txRate == null) {
         const rateFailed = Calc.fxFailure(rateFails[txCurrency]);
-        skipped.push({ row, reason: rateFailed ? `the ${txCurrency} to ${baseCurrency} rate did not load: ${window.RateLimitWait.failReason(rateFailed)} Import the file again` : `no ${txCurrency} to ${baseCurrency} rate` });
+        // Worded when the report is drawn (SymbolCode.late): a refused key
+        // points to the host's panel only while it is up.
+        skipped.push({ row, reason: rateFailed ? window.SymbolCode.late(() => `the ${txCurrency} to ${baseCurrency} rate did not load: ${window.RateLimitWait.failReason(rateFailed)} Import the file again`) : `no ${txCurrency} to ${baseCurrency} rate` });
         continue;
       }
 
@@ -832,7 +834,8 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
         // The history did not load: its reason, not "no market close".
         // Nothing of the row is written either way.
         if (close && close.failed) {
-          skipped.push({ row, reason: `transfer in with no cost basis; the market close did not load: ${window.RateLimitWait.failReason(close.failed)} Import the file again, or add the price column` });
+          const why = close.failed;
+          skipped.push({ row, reason: window.SymbolCode.late(() => `transfer in with no cost basis; the market close did not load: ${window.RateLimitWait.failReason(why)} Import the file again, or add the price column`) });
           continue;
         }
         if (!close) {
@@ -925,7 +928,10 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
     // can say it rather than "Imported N" over rows that silently vanished;
     // the third, what was imported on an assumption (a transfer costed at the
     // day's close, a rate from another day).
-    onImport(imported, skipped.map(x => `${x.row.symbol} ${x.row.date}: ${x.reason}`), [...new Set(notes)], ...(limitLine ? [limitLine] : []));
+    const SCw = window.SymbolCode;
+    onImport(imported, skipped.map(x => (x.reason && typeof x.reason === 'object'
+      ? SCw.late(() => `${x.row.symbol} ${x.row.date}: ${SCw.words(x.reason)}`)
+      : `${x.row.symbol} ${x.row.date}: ${x.reason}`)), [...new Set(notes)], ...(limitLine ? [limitLine] : []));
   };
 
   // Columns whose decimal separator nothing in the file settles, for the
@@ -1306,6 +1312,9 @@ window.ImportCSVModal = ({ portfolioId: openedFor, apiKey, baseCurrency: openedC
 // What a CSV import did, in the page. It was a browser alert() ("Imported 3
 // transactions.") that blocks the tab and stands outside the page.
 window.ImportReportDialog = ({ report, onClose, theme }) => {
+  // A skipped row's reason is worded when drawn: a refused key points to the
+  // host's panel only while it is up.
+  ((window.RateLimitWait && window.RateLimitWait.useHostPanel) || (() => {}))();
   const dialogProps = window.PTDialog ? window.PTDialog.use(onClose, 'Import finished') : { role: 'dialog', 'aria-label': 'Import finished' };
   const C3 = window.C3;
   const isDark = theme === 'dark';
@@ -1315,7 +1324,7 @@ window.ImportReportDialog = ({ report, onClose, theme }) => {
   const notes = (report && report.notes) || [];
   const list = (items, color) => (
     <ul style={{ margin: '6px 0 0', paddingLeft: 18, maxHeight: 160, overflowY: 'auto', fontSize: 13, lineHeight: 1.5, color }}>
-      {items.slice(0, 50).map((x, i) => <li key={i}>{x}</li>)}
+      {items.slice(0, 50).map((x, i) => <li key={i}>{window.SymbolCode.words(x)}</li>)}
       {items.length > 50 && <li style={{ color: muted }}>…and {items.length - 50} more</li>}
     </ul>
   );

@@ -535,14 +535,24 @@ window.PortfolioCalculations = {
    */
   getDayChangeInfo(holdingsWithData) {
     let change = 0, known = 0, unknown = 0;
+    // The currencies of positions whose rate at the previous close is
+    // missing: their move in the portfolio's currency is not known, and is
+    // said rather than worked out at today's rate alone.
+    const noPrevRate = [];
     (holdingsWithData || []).forEach(h => {
       if (!(this.num(h.quantity) > 0)) return;
       const ok = !h.priceUnavailable && h.dayKnown !== false && h.currentPrice && h.previousClose > 0;
       if (!ok) { unknown++; return; }
+      const v = this.dayChangeValue(h.currentPrice, h.previousClose, h.quantity, h.currentExchangeRate || 1, h.dayBought, h.prevExchangeRate);
+      if (v == null) {
+        unknown++;
+        if (h.currency && noPrevRate.indexOf(h.currency) === -1) noPrevRate.push(h.currency);
+        return;
+      }
       known++;
-      change += this.dayChangeValue(h.currentPrice, h.previousClose, h.quantity, h.currentExchangeRate || 1, h.dayBought);
+      change += v;
     });
-    return { change, known, unknown };
+    return { change, known, unknown, noPrevRate };
   },
 
   /**
@@ -569,17 +579,41 @@ window.PortfolioCalculations = {
    * counting them from the previous close gave a position bought at the
    * current price a Day P&L next to a Total Return of $0.00.
    * The row, the header card and the AI table all read this one function.
+   *
+   * In a portfolio kept in another currency the day's move is today's value
+   * at today's rate (`fx`) less yesterday's close value at the rate of the
+   * previous close (`prevFx`): it was the instrument's move times today's
+   * rate, which left the day's FX move out (VTI in a EUR portfolio read
+   * -EUR 51.45 where the EUR closes give -EUR 2.47). `prevFx` null: that
+   * rate is not known, and neither is the move (null). Not given (undefined):
+   * today's rate for both, for a position in the portfolio's own currency.
+   * Shares bought today moved from what was paid for them, at today's rate.
    */
-  dayChangeValue(price, previousClose, quantity, fx, dayBought) {
+  dayChangeValue(price, previousClose, quantity, fx, dayBought, prevFx) {
     const qty = this.num(quantity);
     const rate = fx || 1;
-    let change = (price - previousClose) * qty * rate;
+    const before = prevFx === undefined ? rate : this.toRate(prevFx);
+    if (before == null) return null;
     const bought = dayBought && this.num(dayBought.quantity) > 0 ? Math.min(this.num(dayBought.quantity), qty) : 0;
+    let change = (price * rate - previousClose * before) * (qty - bought);
     if (bought > 0) {
       const paid = this.num(dayBought.cost) / this.num(dayBought.quantity);
-      change += (previousClose - paid) * bought * rate;
+      change += (price - paid) * bought * rate;
     }
     return change;
+  },
+
+  /**
+   * A position's day change in percent, in the portfolio's currency: the
+   * close value at today's rate against the previous close value at its
+   * rate (the instrument's own move when both rates are 1). null when the
+   * previous close or its rate is not known.
+   */
+  dayChangePct(price, previousClose, fx, prevFx) {
+    const rate = fx || 1;
+    const before = prevFx === undefined ? rate : this.toRate(prevFx);
+    if (before == null || !(previousClose > 0) || price == null) return null;
+    return (price * rate - previousClose * before) / (previousClose * before) * 100;
   },
 
   /**
@@ -2067,15 +2101,62 @@ window.PortfolioCalculations = {
    */
   async fxRates(apiKey, baseCurrency, currencies, failsBy) {
     const rates = { [baseCurrency]: 1 };
+    // The rates at the previous close, by currency (`_prev`, not
+    // enumerable): a day's move in the portfolio's currency reads both.
+    const prev = { [baseCurrency]: 1 };
     const unique = [...new Set((currencies || []).filter(c => c && c !== baseCurrency))];
     const found = await Promise.all(unique.map(async (c) => {
       const fails = failsBy ? [] : undefined;
-      const rate = await this.fxRate(apiKey, c, baseCurrency, fails);
-      if (rate == null && fails && fails.length) failsBy[c] = fails;
-      return rate;
+      const day = await this.fxRateDay(apiKey, c, baseCurrency, fails);
+      if (day.rate == null && fails && fails.length) failsBy[c] = fails;
+      return day;
     }));
-    unique.forEach((c, i) => { rates[c] = found[i]; });
+    unique.forEach((c, i) => { rates[c] = found[i].rate; prev[c] = found[i].prev; });
+    Object.defineProperty(rates, '_prev', { value: prev, enumerable: false });
     return rates;
+  },
+
+  /**
+   * { rate, prev }: units of `to` per one unit of `from` now and at the
+   * previous close, found as fxRate finds the rate (direct, inverse, a cross
+   * through USD, minor units scaled), the previous one from the same quotes
+   * (EODHD_API.getForexRateDay). Each null when not known; a client without
+   * getForexRateDay gives the rate alone.
+   */
+  async fxRateDay(apiKey, from, to, fails) {
+    const none = { rate: null, prev: null };
+    if (!from || !to) return none;
+    if (from === to) return { rate: 1, prev: 1 };
+    const f = this.majorUnit(from);
+    const t = this.majorUnit(to);
+    const scale = t.divisor / f.divisor;
+    if (f.currency === t.currency) return { rate: scale, prev: scale };
+    const api = window.EODHD_API;
+    const day = async (a, b) => {
+      if (typeof api.getForexRateDay === 'function') {
+        const d = await api.getForexRateDay(apiKey, a, b, false, fails);
+        return { rate: this.toRate(d && d.rate), prev: this.toRate(d && d.prev) };
+      }
+      return { rate: this.toRate(await api.getForexRate(apiKey, a, b, false, fails)), prev: null };
+    };
+    const pair = async (a, b) => {
+      if (a === b) return { rate: 1, prev: 1 };
+      try {
+        const direct = await day(a, b);
+        if (direct.rate) return direct;
+        const inv = await day(b, a);
+        return inv.rate ? { rate: 1 / inv.rate, prev: inv.prev ? 1 / inv.prev : null } : none;
+      } catch (e) { if (Array.isArray(fails)) fails.push(e || {}); return none; }
+    };
+    let r = await pair(f.currency, t.currency);
+    if (r.rate == null && f.currency !== 'USD' && t.currency !== 'USD') {
+      const a = await pair(f.currency, 'USD');
+      const b = a.rate != null ? await pair('USD', t.currency) : none;
+      r = a.rate != null && b.rate != null
+        ? { rate: a.rate * b.rate, prev: a.prev != null && b.prev != null ? a.prev * b.prev : null }
+        : none;
+    }
+    return r.rate == null ? none : { rate: r.rate * scale, prev: r.prev != null ? r.prev * scale : null };
   },
 
   /**

@@ -43,7 +43,17 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
   const [answeredFor, setAnsweredFor] = React.useState(null);
   // The text whose search failed: its empty list is no answer.
   const searchFailedForRef = React.useRef(null);
+  // The field's turns (SymbolCode.searchTurns): a keystroke, a pick (from
+  // the list or from suggestions kept on screen), Escape, a closed list and
+  // "+ Add to Scenario" start a new one at once. An older turn's answer and
+  // failure are dropped and its request is idle: a row picked while AAP was
+  // out left that search wanted, and its answer opened the list again
+  // under the picked AAPL.US.
+  const turns = window.SymbolCode.useSearchTurns();
+  const endSearch = () => { turns.next(); if (searchTimeout.current) clearTimeout(searchTimeout.current); };
+  const dismissSearch = () => { endSearch(); setShowSearch(false); };
   const handleSymbolChange = (val) => {
+    const t = turns.next();
     queryRef.current = val;
     setSymbolNote(null);
     setSymbol(val.toUpperCase());
@@ -59,16 +69,22 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
         try {
           // The code alone for Yahoo's suffix: search/VOD.L answers nothing,
           // search/VOD answers VOD.LSE (window.SymbolCode.searchText).
-          data = await window.EODHD_API.searchStocks(apiKey, SC.searchText(val), { throwErrors: true });
+          // turns.ask(): idle once its turn is over (the open apps' shell
+          // then says its failure nowhere); while wanted, its failure is the
+          // field's line, not the panel's too.
+          data = await window.EODHD_API.searchStocks(apiKey, SC.searchText(val), turns.ask(t));
         } catch (e) {
           // Said, and its empty list is no answer: Enter and "+ Add" ask the
           // search again.
           const left = SC.apiFor(window.EODHD_API, apiKey).limited();
-          failed = SC.searchFailNote ? SC.searchFailNote(e, left) : 'The ticker search did not load. Try again.';
+          // Worded when drawn (SymbolCode.late): a refused key points to
+          // the host's panel only while it is up.
+          const err = e;
+          failed = SC.searchFailNote ? SC.late(() => SC.searchFailNote(err, left)) : 'The ticker search did not load. Try again.';
           limited = Boolean(SC.searchLimited && SC.searchLimited(e, left));
           thrown = e;
         }
-        if (queryRef.current !== val) return;
+        if (!turns.live(t)) return;
         searchFailedForRef.current = failed ? val.toUpperCase() : null;
         setSearchResults(Array.isArray(data) ? data.slice(0, 5) : []);
         setShowSearch(true);
@@ -106,6 +122,8 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
   const selectSearchResult = (item) => {
     pickGenRef.current++;
     if (symbolKbRef.current && symbolKbRef.current.cancel) symbolKbRef.current.cancel();
+    // The search still out is over: its late answer opens nothing.
+    endSearch();
     // The row's symbol as every screen makes it: IBM on NYSE is IBM.US.
     // A row naming nothing readable leaves its code in the field, where
     // "+ Add to Scenario" says what is wrong with it.
@@ -152,9 +170,13 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
   // Resolves to { symbol, row } or { note }.
   const symbolNowRef = React.useRef(symbol);
   symbolNowRef.current = symbol;
-  const readTyped = async (typed, rows) => {
+  // ctx.idle (useComboboxKeys): Enter's check replaced; over with the
+  // field's turn too -- said by nobody then (apiFor's idle).
+  const readTyped = async (typed, rows, ctx) => {
     const SC = window.SymbolCode;
-    const res = await SC.resolve(typed, Object.assign(SC.apiFor(window.EODHD_API, apiKey), { rows, held: heldSymbols }));
+    const turn = turns.now();
+    const idle = () => !turns.live(turn) || Boolean(ctx && ctx.idle && ctx.idle());
+    const res = await SC.resolve(typed, Object.assign(SC.apiFor(window.EODHD_API, apiKey, { idle }), { rows, held: heldSymbols }));
     // `limited`: the limit stopped the check (said with the wait counting
     // down, as the search's own failure is).
     // `elsewhere`: a bare code listed only on other exchanges, whose
@@ -182,8 +204,8 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
   const symbolKb = useComboboxKeys({
     items: searchResults, open: showSearch && searchResults.length > 0 && !symbolNote, onPick: selectSearchResult, listId: 'wif-symbol-list', query: symbol, codeOf: (it) => it.Code, isDark,
     answered: answeredFor,
-    resolve: async (q, rows) => {
-      const got = await readTyped(q, searchFailedForRef.current === q ? undefined : rows);
+    resolve: async (q, rows, ctx) => {
+      const got = await readTyped(q, searchFailedForRef.current === q ? undefined : rows, ctx);
       if (symbolNowRef.current !== q) return null;
       if (got.note && got.limited) return { note: got.note, limited: true };
       if (got.note && got.elsewhere) return { note: got.note, elsewhere: got.elsewhere };
@@ -191,6 +213,7 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
       return { item: got.row };
     },
     search: (q) => handleSymbolChange(q),
+    onDismiss: dismissSearch,
   });
   symbolKbRef.current = symbolKb;
   const [swapFrom, setSwapFrom] = React.useState('');
@@ -248,7 +271,7 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
     setSymbol('');
     setDollarAmount('');
     // The last search's list is not opened again on the emptied field.
-    if (searchTimeout.current) clearTimeout(searchTimeout.current);
+    endSearch();
     queryRef.current = '';
     setSearchResults([]);
     setShowSearch(false);
@@ -311,7 +334,7 @@ window.WhatIfScenarioTab = ({ apiKey, holdings, holdingsData, baseCurrency, them
         if (!symbolType.current[sc.symbol] && !Calc.knownAssetType(sc.symbol)) {
           try {
             const [code, ex = 'US'] = sc.symbol.split('.');
-            const rows = await window.EODHD_API.searchStocks(apiKey, code);
+            const rows = await window.EODHD_API.searchStocks(apiKey, code, { code: true });
             const hit = Array.isArray(rows) && rows.find(r => String(r.Code).toUpperCase() === code && String(r.Exchange).toUpperCase() === ex);
             if (hit) {
               symbolType.current[sc.symbol] = Calc.typeFromSearchRow(hit);
@@ -551,7 +574,7 @@ Diversification score: ${Math.round(result.diversificationScore)}/100 (effective
             // opened over it. The shared line's too (a code listed only
             // elsewhere, a failed search's Try again).
             open: showSearch && searchResults.length > 0 && !symbolNote && !symbolKb.note,
-            onClose: () => setShowSearch(false),
+            onClose: dismissSearch,
             isDark,
             maxHeight: 280,
             id: 'wif-symbol-list',
@@ -575,7 +598,7 @@ Diversification score: ${Math.round(result.diversificationScore)}/100 (effective
             )
           )}
           {symbolNote && (
-            <div id="wif-symbol-note" role="alert" style={{ marginTop: 4, fontSize: 12, lineHeight: 1.5, color: isDark ? C3.error : (C3.errorLight || '#c81e2c') }}>{symbolNote}</div>
+            <div id="wif-symbol-note" role="alert" style={{ marginTop: 4, fontSize: 12, lineHeight: 1.5, color: isDark ? C3.error : (C3.errorLight || '#c81e2c') }}>{window.SymbolCode.words(symbolNote)}</div>
           )}
         </div>
 

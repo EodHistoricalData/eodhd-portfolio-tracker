@@ -588,6 +588,9 @@ window.BacktestCurrency = {
   },
 };
 window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, holdingsData, onClose, theme, embedded, initialTab, allowedTabs, compact, pricesLoading, onRetryPrices }) => {
+  // Drawn again when a host's panel comes or goes: a line that points to
+  // it is drawn only while it is up (RateLimitWait.hostSaysKey, panelUp).
+  ((window.RateLimitWait && window.RateLimitWait.useHostPanel) || (() => {}))();
   const [activeTab, setActiveTab] = React.useState(initialTab || 'allocation');
   // The Monthly Projection's width, measured: under 300 px the twelve months
   // go in two rows of six instead of one row that scrolled sideways with
@@ -1955,7 +1958,9 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
         const whyCount = histFails.length || refusals.length;
         const whySyms = allHist.filter(x => (histFails.length ? x.failed : x.refused)).map(x => x.symbol);
         setCorrelationMatrix(why
-          ? { error: RLW.failText(historyWhat(whyCount, whySyms), why), failed: why, what: historyWhat(whyCount, whySyms), by: corrBy }
+          // Worded when drawn (SymbolCode.late): a refused key points to
+          // the host's panel only while it is up.
+          ? { error: window.SymbolCode.late(() => RLW.failText(historyWhat(whyCount, whySyms), why)), failed: why, what: historyWhat(whyCount, whySyms), by: corrBy }
           : { error: 'Needs price history — ' + (validSymbols.length ? 'it came back for one symbol only.' : 'none came back for these symbols.') });
         setLoading(false);
         return;
@@ -2039,7 +2044,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
         const why = series.failed || series.refused;
         const count = series.failed ? series.failedCount : series.refusedCount;
         const syms = series.failed ? series.failedSymbols : series.refusedSymbols;
-        const failedRun = { error: RLW.failText(historyWhat(count, syms), why), failed: why, failedCount: count, what: historyWhat(count, syms), by: series.by || null };
+        const failedRun = { error: window.SymbolCode.late(() => RLW.failText(historyWhat(count, syms), why)), failed: why, failedCount: count, what: historyWhat(count, syms), by: series.by || null };
         setMonteCarloData(prev => (prev && !prev.error && prev.forPortfolio === portfolioId ? { ...prev, refreshFailed: failedRun } : failedRun));
         setLoading(false);
         return;
@@ -2229,7 +2234,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
     const held = holdings.find(h => h.symbol && String(h.symbol).toUpperCase() === symbol);
     return window.BacktestCurrency.lookup(symbol, {
       held: held && held.currency,
-      search: (code) => backtestWait(Promise.resolve().then(() => window.EODHD_API.searchStocks(apiKey, code))).then(got => got.value),
+      search: (code) => backtestWait(Promise.resolve().then(() => window.EODHD_API.searchStocks(apiKey, code, { code: true }))).then(got => got.value),
       cache: backtestCcyRef.current,
       asked: backtestCcyAsked.current,
     });
@@ -2354,7 +2359,10 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
         // An older run's history landed while this one was out: it stays.
         if (backtestRunRef.current) { setLoading(false); return; }
         const st = refusalStatus(assetGot);
-        setBacktestResult({ error: historyProblem(symbol, st, assetGot.error), limited: st === 429, failed: true });
+        // Worded when drawn (SymbolCode.late): a refused key points to the
+        // host's panel only while it is up.
+        const why = assetGot.error;
+        setBacktestResult({ error: window.SymbolCode.late(() => historyProblem(symbol, st, why)), limited: st === 429, failed: true });
         setLoading(false);
         return;
       }
@@ -3308,7 +3316,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
                 monteCarloData.refreshFailed && monteCarloData.refreshFailed.by && historyLines(monteCarloData.refreshFailed.by, { panel: 'montecarlo', onRetry: loadMonteCarlo, extra: 'The simulation below is the last one run.', style: { fontSize: 12, marginBottom: 12 } }),
                 monteCarloData.refreshFailed && !monteCarloData.refreshFailed.by && React.createElement(RLW.FailNote, {
                   panel: 'montecarlo', ownFail: 'history',
-                  text: monteCarloData.refreshFailed.error + ' The simulation below is the last one run.',
+                  text: monteCarloData.refreshFailed.error, extra: 'The simulation below is the last one run.',
                   failure: monteCarloData.refreshFailed.failed, onRetry: loadMonteCarlo, isDark,
                   style: { fontSize: 12, marginBottom: 12 }, buttonStyle: { fontFamily: "'Sora', sans-serif" },
                 }),
@@ -3463,7 +3471,7 @@ window.PortfolioAnalyticsView = ({ portfolioId, apiKey, baseCurrency, holdings, 
               <div style={{ textAlign: 'center', padding: 32 }}>
                 {/* The price history that did not come names its request
                     (data-own-fail): the open apps' panel stood over it. */}
-                <p data-own-fail={backtestResult.failed ? 'history' : undefined} data-see-panel={backtestResult.failed ? window.RateLimitWait.seesPanel(backtestResult.error) : undefined} style={{ margin: 0, color: C3.error }}>{backtestResult.error}</p>
+                <p data-own-fail={backtestResult.failed ? 'history' : undefined} data-see-panel={backtestResult.failed ? window.RateLimitWait.seesPanel(window.SymbolCode.words(backtestResult.error)) : undefined} style={{ margin: 0, color: C3.error }}>{window.SymbolCode.words(backtestResult.error)}</p>
                 {backtestResult.limited && (
                   <window.RateLimitWait.RetryButton isDark={isDark} label="Run Backtest" onClick={runBacktest} style={{ marginTop: 12, padding: '6px 14px', borderRadius: 8, border: `1px solid ${isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)'}`, background: 'none', color: isDark ? C3.textDark : C3.textLightTheme, fontSize: 13, fontWeight: 600, cursor: 'pointer' }} />
                 )}

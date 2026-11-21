@@ -2,6 +2,9 @@
 // The view itself; window.PortfolioTrackerView (end of file) wraps it in a
 // boundary that can recover from stored data the view cannot draw.
 window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, activeTab, onTabChange, onSettingsClick, onShowReferral, requireRegistration, initialAction }) => {
+  // Drawn again when a host's panel comes or goes: a line that points to
+  // it is drawn only while it is up (RateLimitWait.hostSaysKey, panelUp).
+  ((window.RateLimitWait && window.RateLimitWait.useHostPanel) || (() => {}))();
   const [portfolios, setPortfolios] = React.useState([]);
   const [activePortfolioId, setActivePortfolioId] = React.useState(null);
   // A save the account may not have yet (no answer, a 5xx): kept on the
@@ -16,10 +19,30 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     recheck();
     return () => ['datasync:pending', 'datasync:pushed', 'datasync:synced'].forEach((t) => window.removeEventListener(t, recheck));
   }, []);
-  const syncNote = syncPending ? (
-    <div role="status" data-sync-pending style={{ fontSize: 12, margin: '6px 0 0', color: theme === 'dark' ? window.C3.textMutedDark : window.C3.textMutedLight }}>
-      Saved on this device, syncing with your account…
-    </div>
+  // A save from before a reload that the account's newer data replaced: not
+  // sent (dataSync.js _replayable), and said once here, in one line.
+  const PT_ALL = ['pt_transactions', 'pt_holdings', 'pt_portfolios', 'pt_settings', 'pt_gamification'];
+  const ptSuperseded = () => Boolean(window.DataSync && window.DataSync.superseded && window.DataSync.superseded().some((n) => PT_ALL.indexOf(n) !== -1));
+  const [superseded, setSuperseded] = React.useState(ptSuperseded);
+  React.useEffect(() => {
+    const recheck = () => setSuperseded(ptSuperseded());
+    window.addEventListener('datasync:superseded', recheck);
+    recheck();
+    return () => window.removeEventListener('datasync:superseded', recheck);
+  }, []);
+  const syncNote = (syncPending || superseded) ? (
+    <>
+      {syncPending && (
+        <div role="status" data-sync-pending style={{ fontSize: 12, margin: '6px 0 0', color: theme === 'dark' ? window.C3.textMutedDark : window.C3.textMutedLight }}>
+          Saved on this device, syncing with your account…
+        </div>
+      )}
+      {superseded && (
+        <div role="status" data-sync-superseded style={{ fontSize: 12, margin: '6px 0 0', color: theme === 'dark' ? window.C3.textMutedDark : window.C3.textMutedLight }}>
+          A change made on this device before the reload was not saved: your account has newer data.
+        </div>
+      )}
+    </>
   ) : null;
   // Phones and tablets (<=1024px): the portfolio picker's icon buttons were
   // 32 px; 40x40 there. Desktop keeps the compact size.
@@ -601,7 +624,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
       // No portfolio selected is no positions on screen -- not the last
       // portfolio's, already deleted.
       priceSeqRef.current++;
-      priceStoreRef.current = { key: null, quotes: {}, eod: {}, rates: {}, rateFails: {}, rateRefused: {}, priceFailBy: {}, priceRefusedBy: {}, noRecord: {}, notAvailable: {}, draw: null, at: null };
+      priceStoreRef.current = { key: null, quotes: {}, eod: {}, rates: {}, prevRates: {}, rateFails: {}, rateRefused: {}, priceFailBy: {}, priceRefusedBy: {}, noRecord: {}, notAvailable: {}, draw: null, at: null };
       setHoldings([]);
       setHoldingsData({});
     }
@@ -611,18 +634,26 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     const currencies = [...new Set(holdingsList.map(h => h.currency || 'USD'))];
     if (!Storage.isForexCacheStale()) {
       const cachedRates = {};
+      const cachedPrev = {};
       let allCached = true;
       for (const currency of currencies) {
         if (currency === baseCurrency) {
           cachedRates[currency] = 1;
+          cachedPrev[currency] = 1;
         } else {
           // A cached "NA" (written before 2026-09-30) is not a rate.
           const rate = Calc.toRate(Storage.getCachedForexRate(currency, baseCurrency));
-          if (rate) cachedRates[currency] = rate;
-          else { allCached = false; break; }
+          // The rate at the previous close too: a rate kept without it (before
+          // it was kept) is asked again, so the day's move is not left unknown.
+          const prev = Calc.toRate(Storage.getCachedForexPrev(currency, baseCurrency));
+          if (rate && prev) { cachedRates[currency] = rate; cachedPrev[currency] = prev; } else { allCached = false; break; }
         }
       }
-      if (allCached) { if (isCurrent()) setForexRates(cachedRates); return cachedRates; }
+      if (allCached) {
+        Object.defineProperty(cachedRates, '_prev', { value: cachedPrev, enumerable: false });
+        if (isCurrent()) setForexRates(cachedRates);
+        return cachedRates;
+      }
     }
     // Calc.fxRates maps minor units (GBX -> GBP/100) and treats "NA" as
     // missing; a missing rate stays null.
@@ -630,8 +661,9 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     // enumerable): the positions it leaves unvalued say why.
     const failsBy = {};
     const rates = await Calc.fxRates(apiKey, baseCurrency, currencies, failsBy);
+    const prevOf = rates._prev || {};
     for (const [currency, rate] of Object.entries(rates)) {
-      if (currency !== baseCurrency && rate) Storage.setCachedForexRate(currency, baseCurrency, rate);
+      if (currency !== baseCurrency && rate) Storage.setCachedForexRate(currency, baseCurrency, rate, prevOf[currency] == null ? null : prevOf[currency]);
     }
     Object.defineProperty(rates, '_fails', { value: failsBy, enumerable: false });
     if (isCurrent()) setForexRates(rates);
@@ -649,7 +681,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   // dropped the first request's answer when it came: prices stayed N/A.
   // An answer is kept if it is newer than the one
   // held, a failure never takes a price away, and the latest load draws.
-  const priceStoreRef = React.useRef({ key: null, quotes: {}, eod: {}, rates: {}, rateFails: {}, rateRefused: {}, priceFailBy: {}, priceRefusedBy: {}, noRecord: {}, notAvailable: {}, draw: null, at: null });
+  const priceStoreRef = React.useRef({ key: null, quotes: {}, eod: {}, rates: {}, prevRates: {}, rateFails: {}, rateRefused: {}, priceFailBy: {}, priceRefusedBy: {}, noRecord: {}, notAvailable: {}, draw: null, at: null });
   // The templates dialog takes the focus when it opens and closes on Escape
   // wherever the focus is: opened with the mouse, the focus stayed on the
   // page behind and Escape did nothing.
@@ -737,7 +769,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     // One store per portfolio, currency and key; another starts afresh.
     const storeKey = `${activePortfolio?.id || activePortfolioId || ''}|${baseCurrency}|${apiKey || ''}`;
     if (priceStoreRef.current.key !== storeKey) {
-      priceStoreRef.current = { key: storeKey, quotes: {}, eod: {}, rates: {}, rateFails: {}, rateRefused: {}, priceFailBy: {}, priceRefusedBy: {}, noRecord: {}, notAvailable: {}, draw: null, at: null };
+      priceStoreRef.current = { key: storeKey, quotes: {}, eod: {}, rates: {}, prevRates: {}, rateFails: {}, rateRefused: {}, priceFailBy: {}, priceRefusedBy: {}, noRecord: {}, notAvailable: {}, draw: null, at: null };
     }
     const store = priceStoreRef.current;
     // Until this load draws, a late answer waits in the store for it.
@@ -745,7 +777,18 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
     // Asked together with the quotes, not before them: both share the wait.
     const ratesAsked = Promise.resolve().then(() => loadForexRates(holdingsList, baseCurrency, current));
     const takeRates = (r) => {
-      Object.entries(r || {}).forEach(([c, v]) => { if (Calc.toRate(v) != null) { store.rates[c] = v; delete store.rateFails[c]; delete store.rateRefused[c]; } });
+      // A currency's rate and its rate at the previous close (Calc.fxRates
+      // `_prev`) are one pair, from one quote: taken together, and a quote
+      // without the earlier rate takes the old one away. Kept from an older
+      // answer, it was set against a newer rate -- {0.9, 0.8} then {1, none}
+      // read a still 100-unit holding as +20 for the day, not unknown.
+      const prev = (r && r._prev) || {};
+      Object.entries(r || {}).forEach(([c, v]) => {
+        if (Calc.toRate(v) == null) return;
+        store.rates[c] = v;
+        if (Calc.toRate(prev[c]) != null) store.prevRates[c] = prev[c]; else delete store.prevRates[c];
+        delete store.rateFails[c]; delete store.rateRefused[c];
+      });
       // A rate that did not come, and why (the limit, EODHD's error, a
       // dropped connection, an answer that could not be read): the footer
       // said only "1 without a price".
@@ -758,6 +801,8 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
       });
     };
     const rateOf = (c) => (c === baseCurrency ? 1 : store.rates[c]);
+    // The rate at the previous close; null when it is not known.
+    const prevRateOf = (c) => (c === baseCurrency ? 1 : (Calc.toRate(store.prevRates[c]) || null));
     // Answers that come after the wait, from this load or an older one of
     // the same portfolio: each prices what it can, drawn by the latest load.
     const redraw = () => {
@@ -1008,6 +1053,9 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
               : new Date().toISOString().slice(0, 10));
             const dayBought = Calc.getDayBought(transactions, quoteDay);
             data[holding.id] = { ...(priceData || {}), ...holdingCalc, close, previousClose, dayKnown, dayBought, currency: holdingCurrency, exchangeRate,
+              // The day's move in the portfolio's currency starts from the
+              // previous close at the rate of that close (Calc.dayChangeValue).
+              prevExchangeRate: prevRateOf(holdingCurrency),
               // The last price kept at the limit (takeQuote): its time and why.
               priceKept: (!eod && store.kept && store.kept[String(holding.symbol).toUpperCase()]) || null };
           } else {
@@ -1310,6 +1358,12 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
   const dayChange = dayInfo.change;
   // Not one day figure came back: N/A, not $0.00 / 0.00 %.
   const dayUnknown = noneValued || (dayInfo.known === 0 && dayInfo.unknown > 0);
+  // Positions whose rate at the previous close did not come: their day's
+  // move in the portfolio's currency is not known, and the line says why
+  // rather than counting them at today's rate.
+  const dayNoPrevRate = (dayInfo.noPrevRate || []).length
+    ? 'no ' + dayInfo.noPrevRate.map(c => `${c}/${activePortfolio?.baseCurrency || 'USD'}`).join(', ') + ' rate at the previous close'
+    : '';
   const goalProgress = activePortfolio?.goal ? Calc.getGoalProgress(totalValue, activePortfolio.goal) : null;
 
   const allTransactions = activePortfolioId ? Storage.getTransactionsByPortfolio(activePortfolioId) : [];
@@ -1551,7 +1605,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
 
     const webSummaryCards = [
       { label: 'Total Value', value: noneValued ? 'N/A' : Calc.formatCurrency(totalValue, activePortfolio?.baseCurrency), sub: `${holdings.length} position${holdings.length === 1 ? '' : 's'}` + (unpricedCount ? `, ${unpricedCount} unpriced` : ''), type: 'brand' },
-      { label: 'Day P&L', value: dayUnknown ? 'N/A' : (dayChange > 0 ? '+' : '') + Calc.formatCurrency(dayChange, activePortfolio?.baseCurrency), sub: noneValued ? 'no prices' : dayUnknown ? 'no day change yet' : (totalValue ? ((dayChange / (totalValue - dayChange) * 100).toFixed(2) + '%') + (dayInfo.unknown ? ` · excl. ${dayInfo.unknown}` : '') : ''), type: dayUnknown ? 'neutral' : signType(dayChange) },
+      { label: 'Day P&L', value: dayUnknown ? 'N/A' : (dayChange > 0 ? '+' : '') + Calc.formatCurrency(dayChange, activePortfolio?.baseCurrency), sub: noneValued ? 'no prices' : dayUnknown ? (dayNoPrevRate || 'no day change yet') : (totalValue ? ((dayChange / (totalValue - dayChange) * 100).toFixed(2) + '%') + (dayInfo.unknown ? ` · excl. ${dayInfo.unknown}` + (dayNoPrevRate ? ` (${dayNoPrevRate})` : '') : '') : ''), type: dayUnknown ? 'neutral' : signType(dayChange) },
       // With no position priced, what the open shares made is unknown; the
       // two cards read $0.00 beside N/A ones.
       { label: returnInfo.dividends ? 'Total Return (incl. div.)' : 'Total Return', value: noneValued ? 'N/A' : (totalReturn > 0 ? '+' : '') + Calc.formatCurrency(totalReturn, activePortfolio?.baseCurrency), sub: noneValued ? 'no prices' : totalReturnSub, type: noneValued ? 'neutral' : signType(totalReturn) },
@@ -1804,8 +1858,11 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                     // total, so the column and the header card agree.
                     // Unknown is N/A, not 0.00.
                     const dayKnown = price != null && d.dayKnown !== false && d.previousClose > 0;
-                    const dayPnl = dayKnown ? Calc.dayChangeValue(price, d.previousClose, shares, d.exchangeRate || 1, d.dayBought) : null;
-                    const dayChgPct = dayKnown ? ((price - d.previousClose) / d.previousClose * 100) : null;
+                    // In the portfolio's currency: the previous close at its own
+                    // rate; null (N/A, with why) when that rate did not come.
+                    const dayPnl = dayKnown ? Calc.dayChangeValue(price, d.previousClose, shares, d.exchangeRate || 1, d.dayBought, d.prevExchangeRate) : null;
+                    const dayChgPct = dayKnown ? Calc.dayChangePct(price, d.previousClose, d.exchangeRate || 1, d.prevExchangeRate) : null;
+                    const dayNoRate = dayKnown && dayPnl == null ? `No ${d.currency}/${activePortfolio?.baseCurrency || 'USD'} rate at the previous close` : undefined;
                     const weight = (mktVal != null && totalValue > 0) ? (mktVal / totalValue * 100) : 0;
                     const dayColor = signColor(dayChgPct);
 
@@ -1847,8 +1904,8 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                           </>);
                         })()}</td>
                         <td style={{ padding: cellPad, textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>{Calc.formatCurrency(price == null ? null : price * (d.exchangeRate || 1), activePortfolio?.baseCurrency)}</td>
-                        <td style={{ padding: cellPad, textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', color: dayColor }}>{dayChgPct == null ? 'N/A' : (dayChgPct > 0 ? '+' : '') + dayChgPct.toFixed(2) + '%'}</td>
-                        <td style={{ padding: cellPad, textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', color: signColor(dayPnl), whiteSpace: 'nowrap' }}>{dayPnl == null ? 'N/A' : <>{dayPnl > 0 ? '+' : ''}{Calc.formatCurrency(dayPnl, activePortfolio?.baseCurrency)}</>}</td>
+                        <td style={{ padding: cellPad, textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', color: dayColor }} title={dayNoRate}>{dayChgPct == null ? 'N/A' : (dayChgPct > 0 ? '+' : '') + dayChgPct.toFixed(2) + '%'}</td>
+                        <td style={{ padding: cellPad, textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', color: signColor(dayPnl), whiteSpace: 'nowrap' }} title={dayNoRate}>{dayPnl == null ? 'N/A' : <>{dayPnl > 0 ? '+' : ''}{Calc.formatCurrency(dayPnl, activePortfolio?.baseCurrency)}</>}</td>
                         <td style={{ padding: cellPad, textAlign: 'right', fontFamily: "'Roboto Mono', monospace", fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', color: signColor(totalPnl), whiteSpace: 'nowrap' }}>{totalPnl > 0 ? '+' : ''}{Calc.formatCurrency(totalPnl, activePortfolio?.baseCurrency)}</td>
                         <td style={{ padding: cellPad, textAlign: 'right', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
                           <span style={{ display: 'inline-block', padding: '2px 6px', borderRadius: 3, fontSize: 11, fontFamily: "'Roboto Mono', monospace", fontWeight: 500, color: signColor(totalPnlPct), background: (totalPnlPct == null || totalPnlPct === 0) ? 'transparent' : totalPnlPct > 0 ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)' }}>{totalPnlPct == null ? 'N/A' : (totalPnlPct > 0 ? '+' : '') + totalPnlPct.toFixed(1) + '%'}</span>
@@ -2103,7 +2160,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                         {holdingsWithData.filter(h => h.symbol).slice(0, 10).map(h => {
                           const w = totalValue > 0 ? ((h.currentValue || 0) / totalValue * 100) : 0;
                           const dp = (h.previousClose && h.currentPrice)
-                            ? Calc.dayChangeValue(h.currentPrice, h.previousClose, h.quantity || 0, h.exchangeRate || 1, h.dayBought)
+                            ? Calc.dayChangeValue(h.currentPrice, h.previousClose, h.quantity || 0, h.exchangeRate || 1, h.dayBought, h.prevExchangeRate)
                             : 0;
                           // Shares held and no price: weight, value and day
                           // move are unknown, not 0.0% $0.00 $0.00.
@@ -2124,7 +2181,7 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
                               <td style={{ padding: '6px 8px', textAlign: 'right', fontFamily: "'Roboto Mono',monospace", color: w > 25 ? acc('#f97316') : ink(0.7) }}>{w.toFixed(1)}%</td>
                               {hasTargets && <td style={{ padding: '6px 8px', textAlign: 'right', fontFamily: "'Roboto Mono',monospace", color: ink(0.7) }}>{targetOf(h) == null ? '—' : `${targetOf(h).toFixed(1)}%`}</td>}
                               <td style={{ padding: '6px 8px', textAlign: 'right', fontFamily: "'Roboto Mono',monospace" }}>{Calc.formatCurrency(h.currentValue || 0, activePortfolio?.baseCurrency)}</td>
-                              <td style={{ padding: '6px 8px', textAlign: 'right', fontFamily: "'Roboto Mono',monospace", color: signColor(dp) }}>{dp > 0 ? '+' : ''}{Calc.formatCurrency(dp, activePortfolio?.baseCurrency)}</td>
+                              <td style={{ padding: '6px 8px', textAlign: 'right', fontFamily: "'Roboto Mono',monospace", color: signColor(dp) }} title={dp == null ? `No ${h.currency}/${activePortfolio?.baseCurrency || 'USD'} rate at the previous close` : undefined}>{dp == null ? 'N/A' : <>{dp > 0 ? '+' : ''}{Calc.formatCurrency(dp, activePortfolio?.baseCurrency)}</>}</td>
                             </tr>
                           );
                         })}
@@ -2599,6 +2656,12 @@ window.PortfolioTrackerViewInner = ({ apiKey, onBack, onSelectAsset, theme, acti
             {!loading && !dayUnknown && dayChange !== 0 && (
               <div style={{ fontSize: 14, marginTop: 4, color: signColor(dayChange) }}>
                 {Calc.formatCurrency(dayChange, activePortfolio?.baseCurrency)} today
+                {dayNoPrevRate && <span style={{ fontSize: 12, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>{` · excl. ${dayInfo.unknown} (${dayNoPrevRate})`}</span>}
+              </div>
+            )}
+            {!loading && !noneValued && dayUnknown && dayNoPrevRate && (
+              <div data-day-no-rate="true" style={{ fontSize: 12, marginTop: 4, color: isDark ? C3.textMutedDark : C3.textMutedLight }}>
+                Day change not known: {dayNoPrevRate}
               </div>
             )}
             {/* Nothing priced, or some positions not: say so, and offer the

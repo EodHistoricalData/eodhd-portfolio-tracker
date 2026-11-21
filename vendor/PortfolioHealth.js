@@ -32,6 +32,9 @@ window.PortfolioHealthScore = {
 };
 
 window.PortfolioHealthView = ({ holdings, positions, apiKey, baseCurrency, onClose, theme, embedded, pricesLoading, onRetryPrices }) => {
+  // Drawn again when a host's panel comes or goes: a line that points to
+  // it is drawn only while it is up (RateLimitWait.hostSaysKey, panelUp).
+  ((window.RateLimitWait && window.RateLimitWait.useHostPanel) || (() => {}))();
   const [activeTab, setActiveTab] = React.useState('overview');
   const [insiderData, setInsiderData] = React.useState([]);
   const [earningsData, setEarningsData] = React.useState([]);

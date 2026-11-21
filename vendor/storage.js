@@ -774,7 +774,7 @@ window.PortfolioStorage = {
   // cache.rates[key] throw inside the price load, an unhandled rejection
   // that left every total at "…" for good.
   getForexCache() {
-    const empty = () => ({ rates: {}, stamps: {}, updatedAt: null });
+    const empty = () => ({ rates: {}, stamps: {}, prev: {}, updatedAt: null });
     try {
       const data = localStorage.getItem(this.KEYS.FOREX_CACHE);
       const cache = asObject(data, empty());
@@ -782,6 +782,8 @@ window.PortfolioStorage = {
       return {
         rates: isMap(cache.rates) ? cache.rates : {},
         stamps: isMap(cache.stamps) ? cache.stamps : {},
+        // Each pair's rate at the previous close, from the same quote.
+        prev: isMap(cache.prev) ? cache.prev : {},
         updatedAt: typeof cache.updatedAt === 'string' ? cache.updatedAt : null,
       };
     } catch (e) {
@@ -838,12 +840,30 @@ window.PortfolioStorage = {
     return cache.rates[key] || null;
   },
 
-  setCachedForexRate(fromCurrency, toCurrency, rate) {
+  // The pair's rate at the previous close, kept with its rate (same time);
+  // null when not known, or kept before it was.
+  getCachedForexPrev(fromCurrency, toCurrency) {
+    if (fromCurrency === toCurrency) return 1;
+    const cache = this.getForexCache();
+    const key = `${fromCurrency}${toCurrency}`;
+    if (this._stale(cache.stamps[key])) return null;
+    const v = Number(cache.prev[key]);
+    return Number.isFinite(v) && v > 0 ? v : null;
+  },
+
+  setCachedForexRate(fromCurrency, toCurrency, rate, prev) {
     try {
       const cache = this.getForexCache();
       const key = `${fromCurrency}${toCurrency}`;
       const now = this.getTimestamp();
       cache.rates[key] = rate;
+      // The rate and its rate at the previous close are one pair, from one
+      // quote. A rate written alone (Add Position, Add Transaction) takes the
+      // kept earlier rate away: kept, it was read with the newer rate as a
+      // pair -- across a day boundary, yesterday's close rate against today's
+      // -- and the portfolio's day move mixed two days. The next load then
+      // asks for the pair.
+      if (Number(prev) > 0) cache.prev[key] = prev; else delete cache.prev[key];
       cache.stamps[key] = now;
       cache.updatedAt = now;
       localStorage.setItem(this.KEYS.FOREX_CACHE, JSON.stringify(cache));
